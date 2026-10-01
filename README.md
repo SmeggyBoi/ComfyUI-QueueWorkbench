@@ -94,6 +94,47 @@ Push notifications are off unless you configure an ntfy topic. Copy
 Environment variables `QUEUE_WORKBENCH_NTFY_URL` and
 `QUEUE_WORKBENCH_PUBLIC_URL` override the file. Restart ComfyUI after changes.
 
+### Notifications and downloads on your phone with Tailscale
+
+The attachment in a notification is a link to your ComfyUI, so your phone has
+to be able to reach it, including when you're away from home.
+[Tailscale](https://tailscale.com) puts your PC and your phone in a private
+network (a *tailnet*) without opening any ports to the internet.
+
+1. Install Tailscale on the ComfyUI machine and on your phone, and sign in to
+   both with the same account.
+2. Make ComfyUI reachable in the tailnet. The simplest way keeps ComfyUI on its
+   default `127.0.0.1:8188`, and Tailscale serves it over HTTPS:
+
+   ```bash
+   tailscale serve --bg 8188
+   ```
+
+   The first time, Tailscale asks you to enable HTTPS certificates for your
+   tailnet. It then prints the address, e.g. `https://my-pc.tail1234.ts.net`.
+   `tailscale serve off` stops it.
+
+   Alternatively, start ComfyUI with `--listen 100.x.y.z` (the machine's
+   Tailscale IP) and use `http://100.x.y.z:8188`, or the MagicDNS name
+   `http://my-pc:8188`.
+3. Put that address in `config.json`:
+
+   ```json
+   {
+     "ntfy_url": "https://ntfy.sh/a-long-random-topic-name",
+     "public_url": "https://my-pc.tail1234.ts.net"
+   }
+   ```
+
+4. Install the ntfy app on your phone and subscribe to the same topic.
+
+The download link only works on devices in your tailnet, so it's useless to
+anyone else even when the notification goes through the public ntfy.sh server.
+Still pick a long, random topic name: anyone who knows it can read your
+notifications. You can also self-host ntfy on the same machine and reach it
+through the tailnet. The same address also opens ComfyUI itself on your phone,
+including this panel and its live preview.
+
 ## Compatibility
 
 - Tested with ComfyUI 0.37.4 and frontend 1.52.7.
