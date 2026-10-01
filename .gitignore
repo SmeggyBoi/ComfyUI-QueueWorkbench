@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+
+# local state and settings
+queue_persist.db
+queue_persist.db-*
+config.json
+
+# local development notes
+docs/superpowers/
+.superpowers/
