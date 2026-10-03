@@ -150,8 +150,9 @@ including this panel and its live preview.
 - Editing in place uses parts of the frontend's workflow-tab handling that
   aren't a public API, so a future frontend update could break it. The rest of
   the panel works independently.
-- If ComfyUI wasn't restarted after installing or updating, ✎ stays hidden and
-  reordering falls back to deleting and re-queueing.
+- If ComfyUI wasn't restarted after installing or updating, ✎ stays hidden,
+  reordering falls back to deleting and re-queueing, and the History tab can't
+  load.
 
 ## Known limitations
 
@@ -168,7 +169,7 @@ including this panel and its live preview.
 
 Everything stays on your machine. The only network request this extension makes
 is the ntfy notification, and only if you configure it. The persistence file
-`queue_persist.db` (in this folder) contains your queued prompts and workflows, and those of your last 200 finished runs.
+`queue_persist.db` (in this folder) contains your queued prompts and workflows, and those of your last 200 finished runs. Since it keeps the full workflow of each of those 200 runs, it can grow to tens of MB with large workflows.
 
 ## Development
 

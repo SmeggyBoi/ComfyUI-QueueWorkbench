@@ -184,13 +184,33 @@ def _list_row(entry):
             "outputs": entry.get("outputs") or {}, "status": entry.get("status")}
 
 
+def _clean_status(status):
+    """A copy of a ComfyUI status dict whose messages have current_inputs/current_outputs
+    removed. Those two execution_error fields carry the failing node's raw inputs — which,
+    for the PROMPT/EXTRA_PNGINFO hidden inputs, is the full API prompt and workflow as
+    strings, and for some V1 nodes an API_KEY_COMFY_ORG / AUTH_TOKEN_COMFY_ORG — so they
+    must never reach disk. Leaves the caller's status untouched."""
+    if status is None:
+        return None
+    cleaned = dict(status)
+    cleaned["messages"] = [
+        [event, {k: v for k, v in (data or {}).items() if k not in ("current_inputs", "current_outputs")}]
+        for event, data in (cleaned.get("messages") or [])
+    ]
+    return cleaned
+
+
 def record_history(entry):
     """Store a finished run (a ComfyUI history entry) and keep the newest HISTORY_LIMIT."""
-    full = {key: entry.get(key) for key in ("prompt", "outputs", "status")}
+    cleaned = dict(entry)
+    cleaned["status"] = _clean_status(entry.get("status"))
+    full = {key: cleaned.get(key) for key in ("prompt", "outputs", "status")}
+    run_json = json.dumps(_list_row(cleaned))
+    entry_json = json.dumps(full)
     with _db_lock, _connect() as conn:
         conn.execute(
             "INSERT OR REPLACE INTO history (prompt_id, run_json, entry_json) VALUES (?,?,?)",
-            (entry["prompt"][1], json.dumps(_list_row(entry)), json.dumps(full)),
+            (entry["prompt"][1], run_json, entry_json),
         )
         conn.execute(
             "DELETE FROM history WHERE id NOT IN "

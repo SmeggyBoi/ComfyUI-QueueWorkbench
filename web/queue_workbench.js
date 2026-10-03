@@ -507,7 +507,7 @@ const MEDIA_RE = /\.(png|jpe?g|webp|bmp|gif|tiff?|mp4|webm|mov|mkv|avi)$/i;
 const VIDEO_RE = /\.(mp4|webm|mov|mkv|avi)$/i;
 
 const viewUrl  = (filename, type, subfolder) =>
-    `/view?filename=${encodeURIComponent(filename)}&type=${type}&subfolder=${encodeURIComponent(subfolder)}`;
+    `/view?filename=${encodeURIComponent(filename)}&type=${encodeURIComponent(type)}&subfolder=${encodeURIComponent(subfolder)}`;
 
 // "sub/file.png [output]" -> { subfolder: "sub", filename: "file.png", type: "output" }
 function mediaRef(value) {
@@ -808,7 +808,7 @@ function requeueBody(item, clientId) {
     const { client_id, create_time, ...extra } = structuredClone(item[3] || {});
     const workflow = extra.extra_pnginfo?.workflow;
     if (workflow) workflow.extra = { ...workflow.extra, qm_queued_at: Date.now() };
-    return { prompt: item[2], extra_data: extra, client_id: clientId };
+    return { prompt: item[2], extra_data: extra, client_id: clientId, partial_execution_targets: item[4] };
 }
 
 // New runs (newest first) go on top; a prompt_id that finished again keeps only its newest run
@@ -1549,10 +1549,13 @@ function renderQueue() {
 let historyRuns     = [];    // { id, item, outputs, status }, newest first
 let historyMore     = false; // older runs exist beyond the loaded ones
 let historyLoaded   = false;
+let historyError    = false; // last fetch (first load or refresh) failed, e.g. 404 before a restart
 let historyNewestId = 0;     // poll cursors, kept apart from the list so deleting rows never moves them
 let historyOldestId = null;
 let historyBusy     = false;
+let historyMoreBusy = false;
 let lastHistoryKey  = null;
+const HISTORY_CLIENT_CAP = 200; // matches the backend's HISTORY_LIMIT; keeps the client list from growing forever
 
 async function fetchHistory(query) {
     const res  = await api.fetchApi(`/queue_workbench/history?${query}`);
@@ -1577,10 +1580,14 @@ async function refreshHistory() {
             historyLoaded = true;
         } else {
             const { runs } = await fetchHistory(`after=${historyNewestId}`);
-            if (runs.length) historyRuns = mergeNewRuns(historyRuns, runs);
+            // cap at the client too: the backend only keeps HISTORY_LIMIT, so older rows
+            // beyond it no longer exist server-side and would just sit there dead weight
+            if (runs.length) historyRuns = mergeNewRuns(historyRuns, runs).slice(0, HISTORY_CLIENT_CAP);
         }
+        historyError = false;
     } catch (e) {
         console.warn("[QueueWorkbench] Failed to fetch history:", e);   // e.g. backend not restarted since updating
+        historyError = true;
     } finally {
         historyBusy = false;
     }
@@ -1588,10 +1595,16 @@ async function refreshHistory() {
 }
 
 async function loadMoreHistory() {
-    const { runs, more } = await fetchHistory(`limit=50&before=${historyOldestId}`);
-    historyRuns = [...historyRuns, ...runs];
-    historyMore = more;
-    renderHistory();
+    if (historyMoreBusy) return;
+    historyMoreBusy = true;
+    try {
+        const { runs, more } = await fetchHistory(`limit=50&before=${historyOldestId}`);
+        historyRuns = [...historyRuns, ...runs];
+        historyMore = more;
+        renderHistory();
+    } finally {
+        historyMoreBusy = false;
+    }
 }
 
 async function fullHistoryItem(run) {
@@ -1632,13 +1645,16 @@ function renderHistory() {
     const list = document.getElementById("qm-history");
     const more = document.getElementById("qm-history-more");
     if (!list || !more) return;
-    const key = JSON.stringify([historyRuns.map(r => r.id), historyMore, expandedId, Object.keys(workflowNames).length]);
+    const key = JSON.stringify([historyRuns.map(r => r.id), historyMore, expandedId, Object.keys(workflowNames).length, historyLoaded, historyError]);
     if (key === lastHistoryKey) return;
     lastHistoryKey = key;
     more.style.display = historyMore ? "block" : "none";
     list.innerHTML = "";
     if (historyRuns.length === 0) {
-        list.innerHTML = `<div style="color:#555;padding:4px 4px;font-size:12px;">No finished runs yet</div>`;
+        const text = !historyLoaded
+            ? (historyError ? "Couldn't load the history. Restart ComfyUI if you just updated." : "Loading…")
+            : "No finished runs yet";
+        list.innerHTML = `<div style="color:#555;padding:4px 4px;font-size:12px;">${text}</div>`;
         return;
     }
     const info = groupInfo(historyRuns.map(r => r.item));

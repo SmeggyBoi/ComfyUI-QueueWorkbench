@@ -83,9 +83,10 @@ test("re-queue body: server picks the prompt_id, fresh queue time, this tab's cl
         extra_pnginfo: { workflow: { id: "wf", nodes: [{ id: 1 }], extra: { qm_name: "Wf", qm_queued_at: 1 } } } }, ["9"]];
     const before = Date.now();
     const body = requeueBody(item, "desktop");
-    assert.deepEqual(Object.keys(body).sort(), ["client_id", "extra_data", "prompt"]);
+    assert.deepEqual(Object.keys(body).sort(), ["client_id", "extra_data", "partial_execution_targets", "prompt"]);
     assert.equal(body.client_id, "desktop");
     assert.equal(body.prompt, item[2], "same graph, same seed");
+    assert.deepEqual(body.partial_execution_targets, item[4], "same outputs, incl. a 'queue selected output nodes' run");
     assert.equal("client_id" in body.extra_data, false);
     assert.equal("create_time" in body.extra_data, false);
     assert.equal(body.extra_data.preview_method, "auto");

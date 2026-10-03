@@ -101,6 +101,53 @@ class HistoryStoreTest(DbTest):
         self.assertEqual(ids(persistence.list_history()[0]), ["b"])
         self.assertIsNone(persistence.get_history_entry("a"))
 
+    def test_execution_error_messages_are_stripped_of_inputs_and_outputs(self):
+        error_message = {
+            "prompt_id": "a",
+            "node_id": "3",
+            "node_type": "SaveImage",
+            "executed": [],
+            "exception_message": "boom",
+            "exception_type": "RuntimeError",
+            "traceback": ["line 1"],
+            "timestamp": 222,
+            "current_inputs": {"images": [{"api_key_comfy_org": "secret-key", "blob": "x" * 5000}]},
+            "current_outputs": ["9"],
+        }
+        e = entry("a", status="error")
+        e["status"] = {
+            "status_str": "error",
+            "completed": False,
+            "messages": [
+                ["execution_start", {"prompt_id": "a", "timestamp": 111}],
+                ["execution_error", error_message],
+            ],
+        }
+        persistence.record_history(e)
+
+        listed = persistence.list_history()[0][0]
+        full = persistence.get_history_entry("a")
+        for status in (listed["status"], full["status"]):
+            stored = dict(status["messages"][1][1])
+            self.assertNotIn("current_inputs", stored)
+            self.assertNotIn("current_outputs", stored)
+            self.assertEqual(stored["node_type"], "SaveImage")
+            self.assertEqual(stored["exception_message"], "boom")
+            self.assertEqual(stored["exception_type"], "RuntimeError")
+            self.assertEqual(stored["timestamp"], 222)
+
+        self.assertNotIn("secret-key", json.dumps(persistence.list_history()))
+        self.assertNotIn("secret-key", json.dumps(persistence.get_history_entry("a")))
+        # the caller's entry is never mutated
+        self.assertIn("current_inputs", e["status"]["messages"][1][1])
+
+    def test_record_history_tolerates_a_missing_status(self):
+        e = entry("a")
+        e["status"] = None
+        persistence.record_history(e)
+        self.assertIsNone(persistence.list_history()[0][0]["status"])
+        self.assertIsNone(persistence.get_history_entry("a")["status"])
+
     def test_run_queued_without_a_workflow(self):
         e = entry("api")
         del e["prompt"][3]["extra_pnginfo"]
