@@ -5,8 +5,8 @@ import fs from "node:fs";
 const src = fs.readFileSync(new URL("../web/queue_workbench.js", import.meta.url), "utf8").replace(/^import .*$/mg, "");
 globalThis.window   = { matchMedia: () => ({ matches: true }) };
 globalThis.document = { getElementById: () => null };
-const { diffPrompts, diffWidgets, patchRun, changeLabel, editedRunPayload, editTabName, siblingCandidates, validationMessage, resubmitBody, detailHtml, groupInfo, slotShifts, markDropTarget, trackDropTarget } = new Function("app", "api",
-    src + "\nreturn { diffPrompts, diffWidgets, patchRun, changeLabel, editedRunPayload, editTabName, siblingCandidates, validationMessage, resubmitBody, detailHtml, groupInfo, slotShifts, markDropTarget, trackDropTarget };")({ registerExtension() {} }, { addEventListener() {} });
+const { diffPrompts, diffWidgets, patchRun, changeLabel, editedRunPayload, editTabName, siblingCandidates, validationMessage, resubmitBody, detailHtml, groupInfo, slotShifts, markDropTarget, trackDropTarget, reorderedIds } = new Function("app", "api",
+    src + "\nreturn { diffPrompts, diffWidgets, patchRun, changeLabel, editedRunPayload, editTabName, siblingCandidates, validationMessage, resubmitBody, detailHtml, groupInfo, slotShifts, markDropTarget, trackDropTarget, reorderedIds };")({ registerExtension() {} }, { addEventListener() {} });
 
 const TEXT = "summary: a woman walks through a sunlit flower shop, smiling at the camera";
 function run(id, { seed = 1, text = TEXT, steps = 12, lora = true } = {}) {
@@ -154,6 +154,30 @@ test("while dragging, red follows the row under the cursor and clears off the ro
     over(a); over(a); over(b); over(null);
     markDropTarget(null);
     assert.deepEqual(log, ["on a", "off a", "on b", "off b"]);
+});
+
+test("reorder: a run dropped on another takes that run's slot; to top; no-ops", () => {
+    const ids = ["a", "b", "c", "d", "e"];
+    assert.deepEqual(reorderedIds(ids, "b", "d"), ["a", "c", "d", "b", "e"], "down: b takes d's slot");
+    assert.deepEqual(reorderedIds(ids, "d", "b"), ["a", "d", "b", "c", "e"], "up: d takes b's slot");
+    assert.deepEqual(reorderedIds(ids, "e", "top"), ["e", "a", "b", "c", "d"]);
+    assert.equal(reorderedIds(ids, "a", "top"), null, "already first");
+    assert.equal(reorderedIds(ids, "c", "c"), null, "dropped on itself");
+    assert.equal(reorderedIds(ids, "gone", "b"), null, "dragged run already started");
+    assert.equal(reorderedIds(ids, "b", "gone"), null, "target already started");
+    assert.deepEqual(ids, ["a", "b", "c", "d", "e"], "input not mutated");
+});
+
+test("detail card offers Move to top only for pending runs #2 and later", () => {
+    const a = run("a");
+    const info = groupInfo([a]).get("a");
+    const has = where => detailHtml(a, info, where).includes("qm-detail-top");
+    assert.equal(has("#3 of 5"), true);
+    assert.equal(has("#10 of 12"), true);
+    assert.equal(has("#1 of 5"), false);
+    assert.equal(has("Running"), false);
+    assert.equal(has("Saved"), false);
+    assert.equal(has("✓ Finished 14:32 · 3m 12s"), false);
 });
 
 let failed = 0;

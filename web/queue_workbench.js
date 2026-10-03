@@ -870,6 +870,7 @@ function detailHtml(item, info, where, run = null) {
             <span style="font-size:14px;font-weight:600;color:#e6e6e6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(workflowName(item) || "Unnamed workflow")}</span>
             <span style="display:flex;align-items:center;gap:8px;flex-shrink:0;">
                 <span style="font-size:12px;color:#9a9a9a;">${esc(where)}</span>
+                ${where.startsWith("#") && !where.startsWith("#1 ") ? `<button class="qm-detail-top" style="${BTN}padding:2px 10px;">⤒ Move to top</button>` : ""}
                 ${canEdit && where.startsWith("#") ? `<button class="qm-detail-edit" style="${BTN}padding:2px 10px;">✎ Edit</button>` : ""}
             </span>
         </div>
@@ -905,12 +906,23 @@ function detailCard() {
     return card;
 }
 
+// Buttons inside a detail card (hover card or inline on touch)
+function wireDetailButtons(container, item) {
+    container.querySelector(".qm-detail-edit")?.addEventListener("click", e => { e.stopPropagation(); editQueuedRun(item).catch(console.error); });
+    container.querySelector(".qm-detail-top")?.addEventListener("click", e => {
+        e.stopPropagation();
+        hideDetailCard();
+        expandedId = null;
+        moveRun(item[1], "top").catch(console.error);
+    });
+}
+
 function showDetailCard(row, item, info, where, run = null) {
     clearTimeout(cardHideTimer);
     const card      = detailCard();
     const wasHidden = card.style.display === "none";
     card.innerHTML  = detailHtml(item, info, where, run);
-    card.querySelector(".qm-detail-edit")?.addEventListener("click", e => { e.stopPropagation(); editQueuedRun(item).catch(console.error); });
+    wireDetailButtons(card, item);
     cardItemId      = item[1];
     // Left of the panel; rows in the lower half anchor the card's bottom so it grows upward
     const panelRect = document.getElementById("qm-panel").getBoundingClientRect();
@@ -954,7 +966,7 @@ function attachDetail(el, item, info, rerender, where, run = null) {
         const detail = document.createElement("div");
         detail.style.cssText = "width:100%;margin-top:8px;padding-top:10px;border-top:1px solid #3a3a3a;font-size:12px;color:#bbb;cursor:auto;user-select:text;";
         detail.innerHTML = detailHtml(item, info, where, run);
-        detail.querySelector(".qm-detail-edit")?.addEventListener("click", e => { e.stopPropagation(); editQueuedRun(item).catch(console.error); });
+        wireDetailButtons(detail, item);
         // Scrolling / selecting the prompt shouldn't collapse the row
         detail.addEventListener("click", e => e.stopPropagation());
         el.appendChild(detail);
@@ -1478,7 +1490,7 @@ function renderQueue() {
         const el   = document.createElement("div");
         el.dataset.promptId = id;
         el.dataset.index    = i;
-        el.draggable        = true;
+        el.draggable        = HOVER;   // touch screens use the pointer drag on the handle (no HTML5 drag)
         el.style.cssText = `
             background: #242424;
             border: 1px solid #3a3a3a;
@@ -1697,7 +1709,7 @@ function renderHistory() {
 // ---------------------------------------------------------------------------
 // Drag-and-drop
 // ---------------------------------------------------------------------------
-let dragSrcIndex = null;
+let dragSrcId    = null; // prompt_id of the row being dragged (mouse)
 let movedId      = null; // prompt_id of the dropped row, flashed once the server's new order lands
 
 // prompt_id -> layout top of each pending row (offsetTop ignores the list's scroll position)
@@ -1730,6 +1742,39 @@ function slideMovedRows(list, before) {
     }
 }
 
+// Pending order (prompt ids) after moving `movedId` onto `targetId`'s slot ("top" = first),
+// or null when nothing moves (dropped on itself, already first, or either run already started)
+function reorderedIds(ids, movedId, targetId) {
+    const from = ids.indexOf(movedId);
+    const to   = targetId === "top" ? 0 : ids.indexOf(targetId);
+    if (from < 0 || to < 0 || from === to) return null;
+    const order = [...ids];
+    order.splice(to, 0, order.splice(from, 1)[0]);
+    return order;
+}
+
+// Mouse drop, touch drop and Move to top all end here. Positions come from the queue as it
+// is now (a run may have started since the drag began), not from the indexes rendered then.
+async function moveRun(promptId, targetId) {
+    queueData   = await fetchQueue();
+    const pending = pendingSorted();
+    const order   = reorderedIds(pending.map(it => it[1]), promptId, targetId);
+    if (!order) return;
+    movedId = promptId;
+    if (canEdit) {
+        // Renumber in place: prompt IDs (and any open edit tab's link to its run) stay intact
+        await api.fetchApi("/queue_workbench/reorder", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ prompt_ids: order }),
+        });
+    } else {
+        const byId = new Map(pending.map(it => [it[1], it]));
+        await reorderQueue(order.map(id => byId.get(id)));
+    }
+    await refreshQueue();
+    movedId = null;
+}
+
 let dropTarget = null; // { el, anim }: the row a drop would move the dragged run to, highlighted red
 
 function markDropTarget(el) {
@@ -1742,11 +1787,11 @@ function markDropTarget(el) {
 // don't), so the highlight can't flicker. Nothing is red over the dragged row or off the list.
 function trackDropTarget(e) {
     const row = e.target.closest?.("#qm-pending [data-prompt-id]");
-    markDropTarget(row && +row.dataset.index !== dragSrcIndex ? row : null);
+    markDropTarget(row && row.dataset.promptId !== dragSrcId ? row : null);
 }
 
 function onDragStart(e) {
-    dragSrcIndex = parseInt(e.currentTarget.dataset.index);
+    dragSrcId = e.currentTarget.dataset.promptId;
     e.currentTarget.style.opacity = "0.4";
     e.dataTransfer.effectAllowed = "move";
     document.addEventListener("dragover", trackDropTarget);
@@ -1765,26 +1810,9 @@ function onDragOver(e) {
 
 async function onDrop(e) {
     e.preventDefault();
-    const destIndex = parseInt(e.currentTarget.dataset.index);
-    if (dragSrcIndex === null || dragSrcIndex === destIndex) return;
-
-    const pending = [...queueData.queue_pending].sort((a, b) => a[0] - b[0]);
-    const moved   = pending.splice(dragSrcIndex, 1)[0];
-    pending.splice(destIndex, 0, moved);
-
-    dragSrcIndex = null;
-    movedId      = moved[1];
-    if (canEdit) {
-        // Renumber in place: prompt IDs (and any open edit tab's link to its run) stay intact
-        await api.fetchApi("/queue_workbench/reorder", {
-            method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ prompt_ids: pending.map(it => it[1]) }),
-        });
-    } else {
-        await reorderQueue(pending);
-    }
-    await refreshQueue();
-    movedId = null;
+    const dragged = dragSrcId;
+    dragSrcId = null;
+    if (dragged) await moveRun(dragged, e.currentTarget.dataset.promptId);
 }
 
 // ---------------------------------------------------------------------------
