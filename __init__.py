@@ -2,7 +2,7 @@
 ComfyUI Queue Workbench — Python backend
 - Captures live preview frames server-side so any connected client can poll them.
 - Optional ntfy push notification when a generation finishes (see config.example.json).
-- Queue persistence (persistence.py) and in-place edit / reorder routes (queue_edit.py).
+- Queue persistence and run history (persistence.py), in-place edit / reorder routes (queue_edit.py).
 """
 import base64
 import json

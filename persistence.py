@@ -20,6 +20,9 @@ row origin values:
   'held'  — items the Queue Workbench paused (deleted from the native queue,
             held client-side); persisted so a pause+shutdown doesn't lose them
   'saved' — backlog from a previous session, awaiting manual restore/discard
+
+Finished runs are also kept (table `history`, newest HISTORY_LIMIT) for the
+panel's History tab, since ComfyUI's own history is RAM-only as well.
 """
 import os
 import json
@@ -58,6 +61,14 @@ def _init_db():
                 origin    TEXT NOT NULL,
                 item_json TEXT NOT NULL,
                 saved_at  INTEGER NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS history (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                prompt_id  TEXT UNIQUE NOT NULL,
+                run_json   TEXT NOT NULL,
+                entry_json TEXT NOT NULL
             )
         """)
         # Anything still marked live/held when we boot was orphaned by the last
@@ -132,8 +143,11 @@ def _install_queue_hooks(prompt_queue):
         return result
 
     def task_done(item_id, history_result, status, process_item=None):
+        running = prompt_queue.currently_running.get(item_id)   # the original pops it
         orig_task_done(item_id, history_result, status, process_item=process_item)
         resync_queue()
+        if running is not None:
+            _record_finished(prompt_queue, running[1])
 
     def delete_queue_item(function):
         result = orig_delete(function)
@@ -149,6 +163,85 @@ def _install_queue_hooks(prompt_queue):
     prompt_queue.task_done = task_done
     prompt_queue.delete_queue_item = delete_queue_item
     prompt_queue.wipe_queue = wipe_queue
+
+
+# ---------------------------------------------------------------------------
+# Run history — finished runs, kept across restarts (ComfyUI's own history is
+# RAM-only). run_json is what the panel lists, entry_json the full entry.
+# ---------------------------------------------------------------------------
+HISTORY_LIMIT = 200
+
+
+def _list_row(entry):
+    """The entry with its GUI workflow cut down to the id and extra stamps the panel rows
+    use: a saved workflow can be ~700 KB and a page lists 50 runs."""
+    number, prompt_id, prompt, extra_data, outputs = entry["prompt"]
+    extra_data = dict(extra_data or {})
+    workflow = (extra_data.pop("extra_pnginfo", None) or {}).get("workflow")
+    if workflow:
+        extra_data["extra_pnginfo"] = {"workflow": {"id": workflow.get("id"), "extra": workflow.get("extra") or {}}}
+    return {"prompt": [number, prompt_id, prompt, extra_data, outputs],
+            "outputs": entry.get("outputs") or {}, "status": entry.get("status")}
+
+
+def record_history(entry):
+    """Store a finished run (a ComfyUI history entry) and keep the newest HISTORY_LIMIT."""
+    full = {key: entry.get(key) for key in ("prompt", "outputs", "status")}
+    with _db_lock, _connect() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO history (prompt_id, run_json, entry_json) VALUES (?,?,?)",
+            (entry["prompt"][1], json.dumps(_list_row(entry)), json.dumps(full)),
+        )
+        conn.execute(
+            "DELETE FROM history WHERE id NOT IN "
+            "(SELECT id FROM history ORDER BY id DESC LIMIT ?)",
+            (HISTORY_LIMIT,),
+        )
+
+
+def list_history(limit=50, before=None, after=None):
+    """Finished runs, newest first: every run newer than `after`, else the newest `limit`
+    (older than `before` if given). Returns (runs, more); more = older runs exist."""
+    if after is not None:
+        sql, args = "WHERE id > ? ORDER BY id DESC", (after,)
+    elif before is not None:
+        sql, args = "WHERE id < ? ORDER BY id DESC LIMIT ?", (before, limit + 1)
+    else:
+        sql, args = "ORDER BY id DESC LIMIT ?", (limit + 1,)
+    with _db_lock, _connect() as conn:
+        rows = conn.execute(f"SELECT id, run_json FROM history {sql}", args).fetchall()
+    more = after is None and len(rows) > limit
+    runs = []
+    for row_id, run_json in (rows[:limit] if more else rows):
+        try:
+            runs.append({"id": row_id, **json.loads(run_json)})
+        except ValueError:
+            pass
+    return runs, more
+
+
+def get_history_entry(prompt_id):
+    """The full entry of a finished run (with the whole workflow), or None."""
+    with _db_lock, _connect() as conn:
+        row = conn.execute("SELECT entry_json FROM history WHERE prompt_id=?", (prompt_id,)).fetchone()
+    return json.loads(row[0]) if row else None
+
+
+def delete_history(prompt_ids):
+    if not prompt_ids:
+        return 0
+    placeholders = ",".join("?" * len(prompt_ids))
+    with _db_lock, _connect() as conn:
+        return conn.execute(f"DELETE FROM history WHERE prompt_id IN ({placeholders})", prompt_ids).rowcount
+
+
+def _record_finished(prompt_queue, prompt_id):
+    try:
+        entry = prompt_queue.get_history(prompt_id=prompt_id).get(prompt_id)
+        if entry:
+            record_history(entry)
+    except Exception:
+        print(f"[QueueWorkbench] history record error:\n{traceback.format_exc()}")
 
 
 # ---------------------------------------------------------------------------
@@ -278,6 +371,36 @@ def _register_routes(server):
             conn.execute("DELETE FROM saved_jobs WHERE origin='held'")
         return web.json_response({"ok": True})
 
+    @routes.get("/queue_workbench/history")
+    async def get_history(request):
+        """Finished runs, newest first: ?limit=50[&before=<id>] pages back, ?after=<id>
+        returns the runs recorded since. Workflows are cut down (see _list_row)."""
+        query = request.rel_url.query
+        try:
+            limit = int(query.get("limit", 50))
+            before = int(query["before"]) if "before" in query else None
+            after = int(query["after"]) if "after" in query else None
+        except ValueError:
+            return web.json_response({"error": "limit, before and after must be integers"}, status=400)
+        runs, more = list_history(limit, before, after)
+        return web.json_response({"runs": runs, "more": more})
+
+    @routes.get("/queue_workbench/history/{prompt_id}")
+    async def get_history_run(request):
+        """The full entry of one finished run, to load it onto the canvas or queue it again."""
+        entry = get_history_entry(request.match_info["prompt_id"])
+        if entry is None:
+            return web.json_response({"error": "not in history"}, status=404)
+        return web.json_response({"run": entry})
+
+    @routes.post("/queue_workbench/history/delete")
+    async def history_delete(request):
+        """Body {"prompt_ids": [...]}: remove these runs from the history."""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        return web.json_response({"deleted": delete_history(body.get("prompt_ids", []))})
 
 
 # ---------------------------------------------------------------------------
