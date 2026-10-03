@@ -1511,7 +1511,7 @@ function renderQueue() {
 
         el.innerHTML = `
             <span style="display:flex;align-items:center;gap:6px;overflow:hidden;flex:1;min-width:0;">
-                <span class="qm-drag-handle" style="color:#555;font-size:16px;cursor:grab;flex-shrink:0;touch-action:none;padding:8px 4px;margin:-8px -4px;">⠿</span>
+                <span class="qm-drag-handle" style="color:#555;font-size:16px;cursor:grab;flex-shrink:0;touch-action:none;padding:8px 10px;margin:-8px -10px;">⠿</span>
                 <span style="display:flex;gap:3px;flex-shrink:0;">${thumbsHtml(thumbs, 44, "#444", "#333")}</span>
                 <span style="display:flex;flex-direction:column;gap:2px;overflow:hidden;min-width:0;">
                     <span style="color:#aaa;font-size:12px;white-space:nowrap;">#${i + 1} <span style="color:#666;font-size:11px;">· ${queuedAt(item)} · <span class="qm-load-workflow" data-index="${i}" style="color:#7b9cfa;cursor:pointer;text-decoration:underline;text-decoration-style:dotted;" title="Load this workflow onto canvas">${shortId(id)}</span></span></span>
@@ -1763,20 +1763,23 @@ async function moveRun(promptId, targetId) {
     queueData   = await fetchQueue();
     const pending = pendingSorted();
     const order   = reorderedIds(pending.map(it => it[1]), promptId, targetId);
-    if (!order) return;
+    if (!order) { renderQueue(); return; }   // nothing moved: still re-render (e.g. an inline detail that was left open)
     movedId = promptId;
-    if (canEdit) {
-        // Renumber in place: prompt IDs (and any open edit tab's link to its run) stay intact
-        await api.fetchApi("/queue_workbench/reorder", {
-            method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ prompt_ids: order }),
-        });
-    } else {
-        const byId = new Map(pending.map(it => [it[1], it]));
-        await reorderQueue(order.map(id => byId.get(id)));
+    try {
+        if (canEdit) {
+            // Renumber in place: prompt IDs (and any open edit tab's link to its run) stay intact
+            await api.fetchApi("/queue_workbench/reorder", {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ prompt_ids: order }),
+            });
+        } else {
+            const byId = new Map(pending.map(it => [it[1], it]));
+            await reorderQueue(order.map(id => byId.get(id)));
+        }
+        await refreshQueue();
+    } finally {
+        movedId = null;
     }
-    await refreshQueue();
-    movedId = null;
 }
 
 let dropTarget = null; // { el, anim }: the row a drop would move the dragged run to, highlighted red
@@ -1805,6 +1808,7 @@ function onDragEnd(e) {
     e.currentTarget.style.opacity = "1";
     document.removeEventListener("dragover", trackDropTarget);
     markDropTarget(null);
+    dragSrcId = null;
 }
 
 function onDragOver(e) {
@@ -1816,7 +1820,7 @@ async function onDrop(e) {
     e.preventDefault();
     const dragged = dragSrcId;
     dragSrcId = null;
-    if (dragged) await moveRun(dragged, e.currentTarget.dataset.promptId);
+    if (dragged) await moveRun(dragged, e.currentTarget.dataset.promptId).catch(console.error);
 }
 
 // ---------------------------------------------------------------------------
@@ -1824,7 +1828,7 @@ async function onDrop(e) {
 // the ⠿ handle starts a pointer drag with the same red target, move, slide and flash
 // ---------------------------------------------------------------------------
 const LONG_PRESS_MS = 300;
-let touchDrag = null; // { el, id, x, y, startY, startScroll, active, timer, raf }
+let touchDrag = null; // { el, id, pointerId, x, y, startY, startScroll, maxScroll, active, armed, timer, raf }
 
 function onHandlePointerDown(e) {
     if (e.pointerType !== "touch" || touchDrag) return;
@@ -1833,14 +1837,18 @@ function onHandlePointerDown(e) {
     e.currentTarget.setPointerCapture(e.pointerId);
     e.currentTarget.addEventListener("pointermove", onHandlePointerMove);
     e.currentTarget.addEventListener("pointerup", onHandlePointerUp);
-    e.currentTarget.addEventListener("pointercancel", endTouchDrag);
-    touchDrag = { el, handle: e.currentTarget, id: el.dataset.promptId, x: e.clientX, y: e.clientY,
-        startY: e.clientY, startScroll: list.scrollTop, active: false, raf: null,
+    e.currentTarget.addEventListener("pointercancel", onHandlePointerCancel);
+    touchDrag = { el, handle: e.currentTarget, id: el.dataset.promptId, pointerId: e.pointerId, x: e.clientX, y: e.clientY,
+        startY: e.clientY, startScroll: list.scrollTop, active: false, armed: false, raf: null,
         timer: setTimeout(startTouchDrag, LONG_PRESS_MS) };
 }
 
 function startTouchDrag() {
     touchDrag.active = true;
+    // The dragged row's own translateY grows the list's scrollHeight, so the real limit has to be
+    // captured now, before any transform is applied, or auto-scroll would chase a moving target
+    const list = document.getElementById("qm-pending");
+    touchDrag.maxScroll = list.scrollHeight - list.clientHeight;
     navigator.vibrate?.(10);
     // Click-through so elementFromPoint finds the row underneath; pointer capture keeps the events coming
     Object.assign(touchDrag.el.style, { opacity: "0.6", pointerEvents: "none", position: "relative", zIndex: "1" });
@@ -1856,10 +1864,16 @@ function placeTouchDrag() {
 }
 
 function onHandlePointerMove(e) {
-    if (!touchDrag) return;
+    if (!touchDrag || e.pointerId !== touchDrag.pointerId) return;
     touchDrag.x = e.clientX;
     touchDrag.y = e.clientY;
-    if (touchDrag.active) placeTouchDrag();
+    if (touchDrag.active) {
+        // Auto-scroll only once the finger has actually moved: holding still right after the long
+        // press fires on a row flush with the list's top/bottom edge must not start scrolling (and
+        // so must not reorder on release) just because the handle happens to sit in the scroll zone
+        if (!touchDrag.armed && Math.abs(e.clientY - touchDrag.startY) > 8) touchDrag.armed = true;
+        placeTouchDrag();
+    }
     else if (Math.abs(e.clientY - touchDrag.startY) > 8) endTouchDrag();   // moved before the long press: not a drag
 }
 
@@ -1867,20 +1881,29 @@ function autoScrollTouchDrag() {
     if (!touchDrag?.active) return;
     const list = document.getElementById("qm-pending");
     const box  = list.getBoundingClientRect();
-    const step = touchDrag.y < box.top + 40 ? -8 : touchDrag.y > box.bottom - 40 ? 8 : 0;
+    const step = !touchDrag.armed ? 0 : touchDrag.y < box.top + 40 ? -8 : touchDrag.y > box.bottom - 40 ? 8 : 0;
     if (step) {
-        list.scrollTop += step;
-        placeTouchDrag();
+        // Clamp to the real max: the dragged row's transform must never be read back as extra scroll room
+        const next = Math.max(0, Math.min(touchDrag.maxScroll, list.scrollTop + step));
+        if (next !== list.scrollTop) {
+            list.scrollTop = next;
+            placeTouchDrag();
+        }
     }
     touchDrag.raf = requestAnimationFrame(autoScrollTouchDrag);
 }
 
-function onHandlePointerUp() {
-    if (!touchDrag) return;
+function onHandlePointerUp(e) {
+    if (!touchDrag || e.pointerId !== touchDrag.pointerId) return;
     const { id, active } = touchDrag;
     const target = dropTarget?.el.dataset.promptId;
     endTouchDrag();
     if (active && target) moveRun(id, target).catch(console.error);
+}
+
+function onHandlePointerCancel(e) {
+    if (!touchDrag || e.pointerId !== touchDrag.pointerId) return;   // a second finger's own cancel isn't ours
+    endTouchDrag();
 }
 
 function endTouchDrag() {
@@ -1891,7 +1914,7 @@ function endTouchDrag() {
     cancelAnimationFrame(raf);
     handle.removeEventListener("pointermove", onHandlePointerMove);
     handle.removeEventListener("pointerup", onHandlePointerUp);
-    handle.removeEventListener("pointercancel", endTouchDrag);
+    handle.removeEventListener("pointercancel", onHandlePointerCancel);
     Object.assign(el.style, { opacity: "", pointerEvents: "", position: "", zIndex: "", transform: "" });
     markDropTarget(null);
     if (active) {

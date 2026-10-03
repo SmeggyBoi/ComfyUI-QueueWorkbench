@@ -4,9 +4,9 @@ import fs from "node:fs";
 
 const src = fs.readFileSync(new URL("../web/queue_workbench.js", import.meta.url), "utf8").replace(/^import .*$/mg, "");
 globalThis.window   = { matchMedia: () => ({ matches: true }) };
-globalThis.document = { getElementById: () => null };
-const { diffPrompts, diffWidgets, patchRun, changeLabel, editedRunPayload, editTabName, siblingCandidates, validationMessage, resubmitBody, detailHtml, groupInfo, slotShifts, markDropTarget, trackDropTarget, reorderedIds } = new Function("app", "api",
-    src + "\nreturn { diffPrompts, diffWidgets, patchRun, changeLabel, editedRunPayload, editTabName, siblingCandidates, validationMessage, resubmitBody, detailHtml, groupInfo, slotShifts, markDropTarget, trackDropTarget, reorderedIds };")({ registerExtension() {} }, { addEventListener() {} });
+globalThis.document = { getElementById: () => null, addEventListener() {}, removeEventListener() {} };
+const { diffPrompts, diffWidgets, patchRun, changeLabel, editedRunPayload, editTabName, siblingCandidates, validationMessage, resubmitBody, detailHtml, groupInfo, slotShifts, markDropTarget, trackDropTarget, reorderedIds, onDragStart, onDragEnd } = new Function("app", "api",
+    src + "\nreturn { diffPrompts, diffWidgets, patchRun, changeLabel, editedRunPayload, editTabName, siblingCandidates, validationMessage, resubmitBody, detailHtml, groupInfo, slotShifts, markDropTarget, trackDropTarget, reorderedIds, onDragStart, onDragEnd };")({ registerExtension() {} }, { addEventListener() {} });
 
 const TEXT = "summary: a woman walks through a sunlit flower shop, smiling at the camera";
 function run(id, { seed = 1, text = TEXT, steps = 12, lora = true } = {}) {
@@ -154,6 +154,18 @@ test("while dragging, red follows the row under the cursor and clears off the ro
     over(a); over(a); over(b); over(null);
     markDropTarget(null);
     assert.deepEqual(log, ["on a", "off a", "on b", "off b"]);
+});
+
+test("never red over the dragged run itself", () => {
+    const log = [];
+    const row = name => ({ dataset: { promptId: name }, animate: () => { log.push(`on ${name}`); return { cancel: () => log.push(`off ${name}`) }; } });
+    const a = row("a"), b = row("b");
+    onDragStart({ currentTarget: { dataset: { promptId: "a" }, style: {} }, dataTransfer: {} });
+    const over = el => trackDropTarget({ target: { closest: () => el } });
+    over(a);   // dragged row itself: no highlight
+    over(b);   // a different row: highlighted
+    onDragEnd({ currentTarget: { style: {} } });
+    assert.deepEqual(log, ["on b", "off b"]);
 });
 
 test("reorder: a run dropped on another takes that run's slot; to top; no-ops", () => {
