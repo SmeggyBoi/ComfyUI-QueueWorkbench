@@ -8,7 +8,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-const BUILD = "2026-10-03b";
+const BUILD = "2026-10-03c";
 
 // Stale-JS detection (PWA caches extension JS hard): compare this bundle's BUILD
 // against the stamp the backend reads from web/queue_workbench.js ON DISK.
@@ -1535,8 +1535,6 @@ function renderQueue() {
         el.addEventListener("dragover",  onDragOver);
         el.addEventListener("drop",      onDrop);
         el.addEventListener("dragend",   onDragEnd);
-        el.addEventListener("dragenter", onDragEnter);
-        el.addEventListener("dragleave", onDragLeave);
 
         pendingEl.appendChild(el);
     }
@@ -1732,27 +1730,32 @@ function slideMovedRows(list, before) {
     }
 }
 
+let dropTarget = null; // { el, anim }: the row a drop would move the dragged run to, highlighted red
+
+function markDropTarget(el) {
+    if ((dropTarget?.el ?? null) === el) return;
+    dropTarget?.anim.cancel();
+    dropTarget = el && { el, anim: el.animate({ backgroundColor: "#4a1f24", boxShadow: "0 0 0 2px #e05260" }, { duration: 120, fill: "forwards" }) };
+}
+
+// dragover keeps firing while the cursor is over a row's children (dragenter/dragleave pairs
+// don't), so the highlight can't flicker. Nothing is red over the dragged row or off the list.
+function trackDropTarget(e) {
+    const row = e.target.closest?.("#qm-pending [data-prompt-id]");
+    markDropTarget(row && +row.dataset.index !== dragSrcIndex ? row : null);
+}
+
 function onDragStart(e) {
     dragSrcIndex = parseInt(e.currentTarget.dataset.index);
     e.currentTarget.style.opacity = "0.4";
     e.dataTransfer.effectAllowed = "move";
+    document.addEventListener("dragover", trackDropTarget);
 }
 
 function onDragEnd(e) {
     e.currentTarget.style.opacity = "1";
-    document.querySelectorAll("#qm-pending [data-prompt-id]").forEach(el => {
-        el.style.borderTop    = "";
-        el.style.borderBottom = "";
-    });
-}
-
-function onDragEnter(e) {
-    e.currentTarget.style.borderTop = "2px solid #7b5cfa";
-}
-
-function onDragLeave(e) {
-    e.currentTarget.style.borderTop    = "";
-    e.currentTarget.style.borderBottom = "";
+    document.removeEventListener("dragover", trackDropTarget);
+    markDropTarget(null);
 }
 
 function onDragOver(e) {

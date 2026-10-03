@@ -5,6 +5,7 @@
 - History tab: the last 200 finished runs, newest first, kept across restarts. Same rows as the queue plus the first output, a ✓ / ✕ / ⏹ status mark, finish time and duration; the detail card shows every output and the error of a failed run.
 - Queue a finished run again (same settings, same seed) or remove it from the history.
 - Pending runs slide to their new place when the order changes (drag and drop, a reorder on another device, the next run starting); the run you dragged flashes briefly.
+- While dragging, the row the run would move to is highlighted red (replaces the flickering drop line).
 
 ## 1.0.0
 
