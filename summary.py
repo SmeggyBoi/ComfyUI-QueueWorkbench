@@ -18,10 +18,12 @@ def fmt_duration(seconds):
     return f"{s // 3600}h {s // 60 % 60:02d}m"
 
 
-def summary_text(runs, seconds):
-    """(title, message) for a finished batch; runs = [(name, "success" | "error" | "interrupted")]."""
+def summary_text(runs, seconds, recovered=0):
+    """(title, message) for a finished batch; runs = [(name, "success" | "error" | "interrupted")].
+    recovered = how many of those successes only got there after an out-of-memory retry."""
     count = {state: sum(1 for _, s in runs if s == state) for state in ("success", "error", "interrupted")}
-    parts = [f"{len(runs)} runs: {count['success']} ✓", f"{count['error']} ✕"]
+    success = f"{count['success']} ✓" + (f" ({recovered} after a retry)" if recovered else "")
+    parts = [f"{len(runs)} runs: {success}", f"{count['error']} ✕"]
     if count["interrupted"]:
         parts.append(f"{count['interrupted']} ⏹")
     parts.append(fmt_duration(seconds))
@@ -53,10 +55,17 @@ class QueueSummary:
             if self._batch:
                 self._batch["last_output"] = output
 
-    def on_finished(self, name, state):
+    def on_finished(self, name, state, prompt_id=None, retry_of=None):
         with self._lock:
             self._open()
-            self._batch["runs"].append((name, state))
+            runs = self._batch["runs"]
+            # a run that recovered on an out-of-memory retry completes under a new prompt_id that
+            # names the original: replace that entry instead of appending a second one for it.
+            run = next((r for r in runs if retry_of is not None and r["prompt_id"] == retry_of), None)
+            if run is not None:
+                run["state"], run["prompt_id"], run["retried"] = state, prompt_id, True
+            else:
+                runs.append({"name": name, "state": state, "prompt_id": prompt_id, "retried": False})
             self._batch["ended"] = self._clock()
             self._cancel()
             self._timer = self._timer_factory(self._quiet, self.fire)
@@ -67,11 +76,19 @@ class QueueSummary:
         remaining = self._tasks_remaining()   # outside our lock: it takes the queue mutex
         with self._lock:
             self._timer = None
-            if self._batch is None or remaining > 0:
+            if self._batch is None:
+                return
+            if remaining > 0:   # execution_success fires before task_done; wait for it to drain
+                self._timer = self._timer_factory(max(self._quiet, 1), self.fire)
+                self._timer.daemon = True
+                self._timer.start()
                 return
             batch, self._batch = self._batch, None
-        if len(batch["runs"]) >= 2:
-            title, message = summary_text(batch["runs"], batch["ended"] - batch["started"])
+        runs = batch["runs"]
+        if len(runs) >= 2:
+            recovered = sum(1 for r in runs if r["retried"] and r["state"] == "success")
+            pairs = [(r["name"], r["state"]) for r in runs]
+            title, message = summary_text(pairs, batch["ended"] - batch["started"], recovered)
             self._send(title, message, batch["last_output"])
 
     def _open(self):

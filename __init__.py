@@ -198,15 +198,17 @@ _orig_send_sync = server.send_sync
 _summary = summary.QueueSummary(_config["ntfy_quiet_seconds"], server.prompt_queue.get_tasks_remaining, _send_summary)
 
 
-def _run_name(data):
-    """qm_name of the run an event belongs to; it is still in currently_running while its events fire."""
+def _run_info(data):
+    """(name, prompt_id, retry_of) of the run an event belongs to; it is still in currently_running
+    while its events fire. retry_of is the prompt_id this run was itself queued again from, if any."""
     prompt_id = data.get("prompt_id") if isinstance(data, dict) else None
     for item in list(server.prompt_queue.currently_running.values()):
         if item[1] == prompt_id:
             workflow = ((item[3] or {}).get("extra_pnginfo") or {}).get("workflow") or {}
             name = (workflow.get("extra") or {}).get("qm_name")
-            return name.removesuffix(".json") if name else "Unnamed run"
-    return "Unnamed run"
+            retry_of = (item[3] or {}).get("qm_retry_of")
+            return (name.removesuffix(".json") if name else "Unnamed run"), prompt_id, retry_of
+    return "Unnamed run", prompt_id, None
 
 
 def _hooked_send_sync(event, data, sid=None):
@@ -220,16 +222,22 @@ def _hooked_send_sync(event, data, sid=None):
                 if _pending_outputs:
                     _summary.on_output(_pending_outputs[-1])
             elif event == "execution_success":
-                _summary.on_finished(_run_name(data), "success")
+                name, prompt_id, retry_of = _run_info(data)
+                _summary.on_finished(name, "success", prompt_id, retry_of)
                 _notify_complete()
             elif event == "execution_interrupted":
-                _summary.on_finished(_run_name(data), "interrupted")
+                name, prompt_id, retry_of = _run_info(data)
+                _summary.on_finished(name, "interrupted", prompt_id, retry_of)
             elif event == "execution_error":
-                _summary.on_finished(_run_name(data), "error")
+                name, prompt_id, retry_of = _run_info(data)
+                _summary.on_finished(name, "error", prompt_id, retry_of)
                 _pending_outputs.clear()
                 _cancel_ntfy_timer()             # drop any armed success timer from this burst
                 error_msg = data.get("exception_message", "Unknown error") if isinstance(data, dict) else "Unknown error"
-                note = oom_retry.failure_note(server.prompt_queue, data, _config["oom_retry"]) if isinstance(data, dict) else ""
+                try:
+                    note = oom_retry.failure_note(server.prompt_queue, data, _config["oom_retry"]) if isinstance(data, dict) else ""
+                except Exception:
+                    note = ""
                 threading.Thread(target=_send_ntfy, args=("Generation failed ❌", error_msg[:100] + note, "high", "x"),
                                  daemon=True).start()
     except Exception:

@@ -101,7 +101,7 @@ Push notifications are off unless you configure an ntfy topic. Copy
 | `ntfy_url` | Full topic URL, e.g. `https://ntfy.sh/my-secret-topic` or your own server |
 | `public_url` | The address your phone uses to reach ComfyUI. If set, the notification attaches the finished file and gets an *Open in browser* button. |
 | `ntfy_quiet_seconds` | Waits this long after the last finished run before notifying. Workflows that finish in several passes then send one notification for the final file. Default 90. The *Queue finished* summary (two or more runs) waits for the queue to stay empty this long. |
-| `oom_retry` | Queue a run again once, at the front, when it fails because the GPU ran out of memory. Never twice, not while the queue is paused. Default `true`. |
+| `oom_retry` | Queue a run again once, at the front, when it fails because the GPU ran out of memory. Never twice, not while the queue is paused. Only runs queued from the ComfyUI page; runs queued by scripts or the API are left to the script. Not for VHS meta-batch runs. Default `true`. |
 
 Environment variables `QUEUE_WORKBENCH_NTFY_URL` and
 `QUEUE_WORKBENCH_PUBLIC_URL` override the file. Restart ComfyUI after changes.

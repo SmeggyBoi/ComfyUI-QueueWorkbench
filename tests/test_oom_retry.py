@@ -45,8 +45,12 @@ class FakeQueue:
         self.done.append(self.currently_running.pop(item_id)[1])
 
 
+QUEUED_FROM_FRONTEND = {"extra_pnginfo": {"workflow": {"extra": {"qm_queued_at": 111}}}}
+
+
 def running_item(extra=None):
-    return (7, "run", {"1": {"inputs": {"seed": 5}}}, {"client_id": "c1", **(extra or {})}, ["9"], {"api_key": "secret"})
+    return (7, "run", {"1": {"inputs": {"seed": 5}}},
+            {"client_id": "c1", **QUEUED_FROM_FRONTEND, **(extra or {})}, ["9"], {"api_key": "secret"})
 
 
 class RetryTest(unittest.TestCase):
@@ -67,7 +71,7 @@ class RetryTest(unittest.TestCase):
         self.assertEqual(retry[0], 4, "in front of every pending run")
         self.assertNotEqual(retry[1], "run")
         self.assertEqual(retry[2], {"1": {"inputs": {"seed": 5}}})
-        self.assertEqual(retry[3], {"client_id": "c1", "qm_retry_of": "run"})
+        self.assertEqual(retry[3], {"client_id": "c1", **QUEUED_FROM_FRONTEND, "qm_retry_of": "run"})
         self.assertEqual(retry[4], ["9"])
         self.assertEqual(retry[5], {"api_key": "secret"}, "tokens stay in memory for the retry")
         self.assertEqual(q.flags, {"free_memory": True})
@@ -82,11 +86,16 @@ class RetryTest(unittest.TestCase):
 
     def test_other_errors_successes_retries_and_paused_queues_are_not_retried(self):
         other = ("execution_error", {"exception_type": "ValueError", "exception_message": "bad input"})
+        meta_batch_prompt = {"1": {"inputs": {}, "class_type": "VHS_BatchManager"}, "2": {"inputs": {}, "class_type": "KSampler"}}
         cases = [
             (running_item(), status(error=other), False),
             (running_item(), status("success", error=None), False),
             (running_item({"qm_retry_of": "older"}), status(), False),
             (running_item(), status(), True),   # paused
+            ((7, "run", {}, {"client_id": "c1"}, ["9"], {}), status(), False),   # queued by a script: no qm_queued_at stamp
+            (running_item({"extra_pnginfo": {"workflow": None}}), status(), False),   # null-safe: workflow may be None
+            (running_item({"extra_pnginfo": {"workflow": {"extra": None}}}), status(), False),   # null-safe: extra may be None
+            ((7, "run", meta_batch_prompt, {"client_id": "c1", **QUEUED_FROM_FRONTEND}, ["9"], {}), status(), False),   # VHS meta batch
         ]
         for item, st, paused in cases:
             held[0] = paused
@@ -117,3 +126,8 @@ class RetryTest(unittest.TestCase):
         held[0] = False
         q.currently_running[3] = running_item({"qm_retry_of": "older"})
         self.assertEqual(oom_retry.failure_note(q, data, True), " — failed again after a retry")
+        q.currently_running[3] = (7, "run", {}, {"client_id": "c1"}, ["9"], {})
+        self.assertEqual(oom_retry.failure_note(q, data, True), " — not retried (queued by a script)")
+        meta_batch_prompt = {"1": {"inputs": {}, "class_type": "VHS_BatchManager"}}
+        q.currently_running[3] = (7, "run", meta_batch_prompt, {"client_id": "c1", **QUEUED_FROM_FRONTEND}, ["9"], {})
+        self.assertEqual(oom_retry.failure_note(q, data, True), " — not retried (meta batch)")

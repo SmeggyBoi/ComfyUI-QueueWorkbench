@@ -8,7 +8,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-const BUILD = "2026-10-03e";
+const BUILD = "2026-10-03f";
 
 // Stale-JS detection (PWA caches extension JS hard): compare this bundle's BUILD
 // against the stamp the backend reads from web/queue_workbench.js ON DISK.
@@ -805,7 +805,7 @@ function outputMedia(outputs) {
 // A finished run queued again as a new run: same graph and seed. The server picks the
 // prompt_id, the queue time is stamped fresh and the live preview goes to clientId.
 function requeueBody(item, clientId) {
-    const { client_id, create_time, ...extra } = structuredClone(item[3] || {});
+    const { client_id, create_time, qm_retry_of, ...extra } = structuredClone(item[3] || {});
     const workflow = extra.extra_pnginfo?.workflow;
     if (workflow) workflow.extra = { ...workflow.extra, qm_queued_at: Date.now() };
     return { prompt: item[2], extra_data: extra, client_id: clientId, partial_execution_targets: item[4] };

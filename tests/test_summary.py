@@ -71,6 +71,55 @@ class SummaryTest(unittest.TestCase):
         title, message = summary.summary_text([(f"r{i}", "error") for i in range(7)], 60)
         self.assertTrue(message.endswith("Failed: r0, r1, r2, r3, r4 +2 more"))
 
+    def test_a_run_that_recovers_on_retry_merges_into_one_entry(self):
+        self.now[0] = 0
+        self.s.on_start()
+        self.now[0] = 50
+        self.s.on_finished("Wf A", "error", prompt_id="p1")
+        self.now[0] = 90
+        self.s.on_finished("Wf A", "success", prompt_id="p2", retry_of="p1")
+        self.s.fire()
+        self.assertEqual(self.sent, [], "one run after merging: below the 2+ runs threshold")
+
+    def test_a_recovered_run_counts_as_a_success_not_a_failure(self):
+        self.now[0] = 0
+        self.s.on_start()
+        self.now[0] = 50
+        self.s.on_finished("Wf A", "error", prompt_id="p1")
+        self.now[0] = 90
+        self.s.on_finished("Wf A", "success", prompt_id="p2", retry_of="p1")
+        self.now[0] = 120
+        self.s.on_finished("Wf B", "success", prompt_id="p3")
+        self.s.fire()
+        self.assertEqual(self.sent, [("Queue finished ✅", "2 runs: 2 ✓ (1 after a retry) · 0 ✕ · 2m 00s", None)])
+
+    def test_re_arms_the_timer_while_a_task_remains_then_sends_once_it_drains(self):
+        self.run_one("A", "success", 0, 10)
+        self.run_one("B", "error", 10, 20)
+        self.remaining[0] = 1
+        self.s.fire()
+        self.assertEqual(self.sent, [], "still a task left: no summary yet")
+        timer = self.s._timer
+        self.assertIsNotNone(timer, "re-armed instead of being dropped")
+        self.assertEqual(timer.seconds, 90)
+        self.remaining[0] = 0
+        timer.fn()
+        self.assertEqual(len(self.sent), 1)
+
+    def test_re_arms_with_at_least_one_second_when_quiet_seconds_is_zero(self):
+        s = summary.QueueSummary(0, lambda: self.remaining[0], lambda *a: self.sent.append(a),
+                                 clock=lambda: self.now[0], timer=FakeTimer)
+        self.now[0] = 0
+        s.on_start()
+        self.now[0] = 10
+        s.on_finished("A", "success")
+        self.now[0] = 20
+        s.on_finished("B", "error")
+        self.remaining[0] = 1
+        s.fire()
+        self.assertIsNotNone(s._timer)
+        self.assertEqual(s._timer.seconds, 1, "0 would mean Timer(0, ...) fires immediately in a loop")
+
     def test_a_new_run_cancels_the_pending_timer(self):
         self.run_one("A", "success", 0, 10)
         timer = self.s._timer

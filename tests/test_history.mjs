@@ -79,7 +79,7 @@ test("output media: saved outputs before temp previews, videos recognised, dupli
 });
 
 test("re-queue body: server picks the prompt_id, fresh queue time, this tab's client, original untouched", () => {
-    const item = [3, "old-id", { "1": { inputs: { seed: 5 } } }, { client_id: "phone", create_time: 1, preview_method: "auto",
+    const item = [3, "old-id", { "1": { inputs: { seed: 5 } } }, { client_id: "phone", create_time: 1, preview_method: "auto", qm_retry_of: "x",
         extra_pnginfo: { workflow: { id: "wf", nodes: [{ id: 1 }], extra: { qm_name: "Wf", qm_queued_at: 1 } } } }, ["9"]];
     const before = Date.now();
     const body = requeueBody(item, "desktop");
@@ -89,6 +89,7 @@ test("re-queue body: server picks the prompt_id, fresh queue time, this tab's cl
     assert.deepEqual(body.partial_execution_targets, item[4], "same outputs, incl. a 'queue selected output nodes' run");
     assert.equal("client_id" in body.extra_data, false);
     assert.equal("create_time" in body.extra_data, false);
+    assert.equal("qm_retry_of" in body.extra_data, false);
     assert.equal(body.extra_data.preview_method, "auto");
     assert.equal(body.extra_data.extra_pnginfo.workflow.extra.qm_name, "Wf");
     assert.ok(body.extra_data.extra_pnginfo.workflow.extra.qm_queued_at >= before);

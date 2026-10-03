@@ -29,6 +29,11 @@ def retry_blocker(item):
         return "already a retry"
     if persistence.has_held():
         return "queue paused"
+    workflow = ((item[3] or {}).get("extra_pnginfo") or {}).get("workflow") or {}
+    if not (workflow.get("extra") or {}).get("qm_queued_at"):
+        return "queued by a script"
+    if any((node or {}).get("class_type") == "VHS_BatchManager" for node in (item[2] or {}).values()):
+        return "part of a meta batch"
     return None
 
 
@@ -72,4 +77,6 @@ def failure_note(prompt_queue, data, enabled):
         return ""
     return {None: " — retrying once",
             "queue paused": " — not retried (queue paused)",
-            "already a retry": " — failed again after a retry"}[retry_blocker(item)]
+            "already a retry": " — failed again after a retry",
+            "queued by a script": " — not retried (queued by a script)",
+            "part of a meta batch": " — not retried (meta batch)"}[retry_blocker(item)]
