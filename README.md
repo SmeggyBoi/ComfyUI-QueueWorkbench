@@ -66,7 +66,7 @@ red banner at the top tells you so.
 | See everything about a run | Hover a row (desktop) or tap it (touch) |
 | Open a run as a normal copy | Click its short ID |
 | Edit a run in place | ✎ on the row or *✎ Edit* in the detail card, change the graph, then **Update queued run** (or **Cancel**) |
-| Reorder | Drag a row onto another |
+| Reorder | Drag a row onto another. On a phone: long-press ⠿ and drag, or ⤒ Move to top in the run's detail |
 | Pause / resume | *Pause* in the panel header. The running job finishes; nothing else starts until you resume. |
 | Restore after a restart | *Saved from previous session* section: restore one or all, or discard |
 | See finished runs | *History* tab; *Show more* loads older ones |

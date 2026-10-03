@@ -8,7 +8,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-const BUILD = "2026-10-03c";
+const BUILD = "2026-10-03d";
 
 // Stale-JS detection (PWA caches extension JS hard): compare this bundle's BUILD
 // against the stamp the backend reads from web/queue_workbench.js ON DISK.
@@ -1473,6 +1473,7 @@ function renderQueue() {
     }
 
     // Pending items — drag-and-drop list
+    if (touchDrag) endTouchDrag();   // the rows are about to be replaced
     const tops = rowTops(pendingEl);   // where each row was, so rows that change slots can slide
     pendingEl.innerHTML = "";
     if (pending.length === 0) {
@@ -1510,7 +1511,7 @@ function renderQueue() {
 
         el.innerHTML = `
             <span style="display:flex;align-items:center;gap:6px;overflow:hidden;flex:1;min-width:0;">
-                <span style="color:#555;font-size:16px;cursor:grab;flex-shrink:0;">⠿</span>
+                <span class="qm-drag-handle" style="color:#555;font-size:16px;cursor:grab;flex-shrink:0;touch-action:none;padding:8px 4px;margin:-8px -4px;">⠿</span>
                 <span style="display:flex;gap:3px;flex-shrink:0;">${thumbsHtml(thumbs, 44, "#444", "#333")}</span>
                 <span style="display:flex;flex-direction:column;gap:2px;overflow:hidden;min-width:0;">
                     <span style="color:#aaa;font-size:12px;white-space:nowrap;">#${i + 1} <span style="color:#666;font-size:11px;">· ${queuedAt(item)} · <span class="qm-load-workflow" data-index="${i}" style="color:#7b9cfa;cursor:pointer;text-decoration:underline;text-decoration-style:dotted;" title="Load this workflow onto canvas">${shortId(id)}</span></span></span>
@@ -1547,6 +1548,9 @@ function renderQueue() {
         el.addEventListener("dragover",  onDragOver);
         el.addEventListener("drop",      onDrop);
         el.addEventListener("dragend",   onDragEnd);
+        const handle = el.querySelector(".qm-drag-handle");
+        handle.addEventListener("pointerdown", onHandlePointerDown);
+        handle.addEventListener("contextmenu", e => e.preventDefault());   // long press must not open the menu
 
         pendingEl.appendChild(el);
     }
@@ -1813,6 +1817,89 @@ async function onDrop(e) {
     const dragged = dragSrcId;
     dragSrcId = null;
     if (dragged) await moveRun(dragged, e.currentTarget.dataset.promptId);
+}
+
+// ---------------------------------------------------------------------------
+// Touch drag — touch browsers don't fire HTML5 drag events, so on phones a long press on
+// the ⠿ handle starts a pointer drag with the same red target, move, slide and flash
+// ---------------------------------------------------------------------------
+const LONG_PRESS_MS = 300;
+let touchDrag = null; // { el, id, x, y, startY, startScroll, active, timer, raf }
+
+function onHandlePointerDown(e) {
+    if (e.pointerType !== "touch" || touchDrag) return;
+    const el   = e.currentTarget.closest("[data-prompt-id]");
+    const list = document.getElementById("qm-pending");
+    e.currentTarget.setPointerCapture(e.pointerId);
+    e.currentTarget.addEventListener("pointermove", onHandlePointerMove);
+    e.currentTarget.addEventListener("pointerup", onHandlePointerUp);
+    e.currentTarget.addEventListener("pointercancel", endTouchDrag);
+    touchDrag = { el, handle: e.currentTarget, id: el.dataset.promptId, x: e.clientX, y: e.clientY,
+        startY: e.clientY, startScroll: list.scrollTop, active: false, raf: null,
+        timer: setTimeout(startTouchDrag, LONG_PRESS_MS) };
+}
+
+function startTouchDrag() {
+    touchDrag.active = true;
+    navigator.vibrate?.(10);
+    // Click-through so elementFromPoint finds the row underneath; pointer capture keeps the events coming
+    Object.assign(touchDrag.el.style, { opacity: "0.6", pointerEvents: "none", position: "relative", zIndex: "1" });
+    touchDrag.raf = requestAnimationFrame(autoScrollTouchDrag);
+}
+
+// Keep the dragged row under the finger (also while the list auto-scrolls) and mark the target
+function placeTouchDrag() {
+    const list = document.getElementById("qm-pending");
+    touchDrag.el.style.transform = `translateY(${touchDrag.y - touchDrag.startY + list.scrollTop - touchDrag.startScroll}px)`;
+    const row = document.elementFromPoint(touchDrag.x, touchDrag.y)?.closest("#qm-pending [data-prompt-id]");
+    markDropTarget(row && row !== touchDrag.el ? row : null);
+}
+
+function onHandlePointerMove(e) {
+    if (!touchDrag) return;
+    touchDrag.x = e.clientX;
+    touchDrag.y = e.clientY;
+    if (touchDrag.active) placeTouchDrag();
+    else if (Math.abs(e.clientY - touchDrag.startY) > 8) endTouchDrag();   // moved before the long press: not a drag
+}
+
+function autoScrollTouchDrag() {
+    if (!touchDrag?.active) return;
+    const list = document.getElementById("qm-pending");
+    const box  = list.getBoundingClientRect();
+    const step = touchDrag.y < box.top + 40 ? -8 : touchDrag.y > box.bottom - 40 ? 8 : 0;
+    if (step) {
+        list.scrollTop += step;
+        placeTouchDrag();
+    }
+    touchDrag.raf = requestAnimationFrame(autoScrollTouchDrag);
+}
+
+function onHandlePointerUp() {
+    if (!touchDrag) return;
+    const { id, active } = touchDrag;
+    const target = dropTarget?.el.dataset.promptId;
+    endTouchDrag();
+    if (active && target) moveRun(id, target).catch(console.error);
+}
+
+function endTouchDrag() {
+    if (!touchDrag) return;
+    const { el, handle, active, timer, raf } = touchDrag;
+    touchDrag = null;
+    clearTimeout(timer);
+    cancelAnimationFrame(raf);
+    handle.removeEventListener("pointermove", onHandlePointerMove);
+    handle.removeEventListener("pointerup", onHandlePointerUp);
+    handle.removeEventListener("pointercancel", endTouchDrag);
+    Object.assign(el.style, { opacity: "", pointerEvents: "", position: "", zIndex: "", transform: "" });
+    markDropTarget(null);
+    if (active) {
+        // The finger lifting off ends in a click on the row; it must not toggle the detail
+        const swallow = ev => { ev.stopPropagation(); ev.preventDefault(); };
+        window.addEventListener("click", swallow, { capture: true, once: true });
+        setTimeout(() => window.removeEventListener("click", swallow, { capture: true }), 400);
+    }
 }
 
 // ---------------------------------------------------------------------------

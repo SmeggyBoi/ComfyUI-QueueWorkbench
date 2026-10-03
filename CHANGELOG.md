@@ -6,6 +6,7 @@
 - Queue a finished run again (same settings, same seed) or remove it from the history.
 - Pending runs slide to their new place when the order changes (drag and drop, a reorder on another device, the next run starting); the run you dragged flashes briefly.
 - While dragging, the row the run would move to is highlighted red (replaces the flickering drop line).
+- Reorder on phones: long-press ⠿ and drag (same red target, slide and flash), or ⤒ Move to top in a pending run's detail.
 
 ## 1.0.0
 
