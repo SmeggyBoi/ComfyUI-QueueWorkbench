@@ -19,7 +19,7 @@ import folder_paths
 from aiohttp import web
 from server import PromptServer
 
-from . import oom_retry
+from . import oom_retry, summary
 
 WEB_DIRECTORY = "./web"
 NODE_CLASS_MAPPINGS = {}
@@ -164,18 +164,27 @@ def _fire_ntfy():
         out = _best_output[0]
         _best_output[0] = None
         _ntfy_timer[0] = None
-    if not out:
-        _send_ntfy("Generation complete ✅", "Your ComfyUI workflow finished.")
-        return
-    fname, subfolder, ftype = out
+    fname = out[0]
     if not _config["public_url"]:
         _send_ntfy("Generation complete ✅", f"Finished: {fname}")
         return
+    attach_url = _view_url(out)
+    _send_ntfy("Generation complete ✅", f"Tap to download {fname}.", attach_url=attach_url, filename=fname)
+
+
+def _view_url(out):
+    fname, subfolder, ftype = out
     params = {"filename": fname, "type": ftype}
     if subfolder:
         params["subfolder"] = subfolder
-    attach_url = f"{_config['public_url']}/view?{urllib.parse.urlencode(params)}"
-    _send_ntfy("Generation complete ✅", f"Tap to download {fname}.", attach_url=attach_url, filename=fname)
+    return f"{_config['public_url']}/view?{urllib.parse.urlencode(params)}"
+
+
+def _send_summary(title, message, out):
+    if out and _config["public_url"]:
+        _send_ntfy(title, message, tags="checkered_flag", attach_url=_view_url(out), filename=out[0])
+    else:
+        _send_ntfy(title, message, tags="checkered_flag")
 
 
 # ---------------------------------------------------------------------------
@@ -183,17 +192,37 @@ def _fire_ntfy():
 # ---------------------------------------------------------------------------
 server = PromptServer.instance
 _orig_send_sync = server.send_sync
+_summary = summary.QueueSummary(_config["ntfy_quiet_seconds"], server.prompt_queue.get_tasks_remaining, _send_summary)
+
+
+def _run_name(data):
+    """qm_name of the run an event belongs to; it is still in currently_running while its events fire."""
+    prompt_id = data.get("prompt_id") if isinstance(data, dict) else None
+    for item in list(server.prompt_queue.currently_running.values()):
+        if item[1] == prompt_id:
+            workflow = ((item[3] or {}).get("extra_pnginfo") or {}).get("workflow") or {}
+            name = (workflow.get("extra") or {}).get("qm_name")
+            return name.removesuffix(".json") if name else "Unnamed run"
+    return "Unnamed run"
 
 
 def _hooked_send_sync(event, data, sid=None):
     try:
         _capture_preview(event, data)
         if _config["ntfy_url"]:
-            if event == "executed":
+            if event == "execution_start":
+                _summary.on_start()
+            elif event == "executed":
                 _collect_outputs(data)
+                if _pending_outputs:
+                    _summary.on_output(_pending_outputs[-1])
             elif event == "execution_success":
+                _summary.on_finished(_run_name(data), "success")
                 _notify_complete()
+            elif event == "execution_interrupted":
+                _summary.on_finished(_run_name(data), "interrupted")
             elif event == "execution_error":
+                _summary.on_finished(_run_name(data), "error")
                 _pending_outputs.clear()
                 _cancel_ntfy_timer()             # drop any armed success timer from this burst
                 error_msg = data.get("exception_message", "Unknown error") if isinstance(data, dict) else "Unknown error"
