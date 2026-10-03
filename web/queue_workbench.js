@@ -8,7 +8,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-const BUILD = "2026-10-03a";
+const BUILD = "2026-10-03b";
 
 // Stale-JS detection (PWA caches extension JS hard): compare this bundle's BUILD
 // against the stamp the backend reads from web/queue_workbench.js ON DISK.
@@ -1461,6 +1461,7 @@ function renderQueue() {
     }
 
     // Pending items — drag-and-drop list
+    const tops = rowTops(pendingEl);   // where each row was, so rows that change slots can slide
     pendingEl.innerHTML = "";
     if (pending.length === 0) {
         pendingEl.innerHTML = `<div style="color:#555;padding:4px 4px;font-size:12px;">Queue is empty</div>`;
@@ -1539,6 +1540,7 @@ function renderQueue() {
 
         pendingEl.appendChild(el);
     }
+    slideMovedRows(pendingEl, tops);
 }
 
 // ---------------------------------------------------------------------------
@@ -1698,6 +1700,37 @@ function renderHistory() {
 // Drag-and-drop
 // ---------------------------------------------------------------------------
 let dragSrcIndex = null;
+let movedId      = null; // prompt_id of the dropped row, flashed once the server's new order lands
+
+// prompt_id -> layout top of each pending row (offsetTop ignores the list's scroll position)
+function rowTops(list) {
+    return new Map([...list.querySelectorAll("[data-prompt-id]")].map(el => [el.dataset.promptId, el.offsetTop]));
+}
+
+// Rows that changed slots: prompt_id -> how far (px) the row starts from its new place
+function slotShifts(before, after) {
+    const shifts = new Map();
+    for (const [id, top] of after) {
+        if (before.has(id) && before.get(id) !== top) shifts.set(id, before.get(id) - top);
+    }
+    return shifts;
+}
+
+// After a re-render, rows that changed slots slide from their old place (FLIP), and the
+// row just dropped flashes, so a reorder is visible at a glance
+function slideMovedRows(list, before) {
+    const shifts = slotShifts(before, rowTops(list));
+    const still  = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    for (const el of list.querySelectorAll("[data-prompt-id]")) {
+        const dy = shifts.get(el.dataset.promptId);
+        if (!dy) continue;
+        if (!still) el.animate([{ transform: `translateY(${dy}px)` }, { transform: "none" }], { duration: 200, easing: "ease-out" });
+        if (el.dataset.promptId === movedId) {
+            el.animate([{ backgroundColor: "#3a2f6a", boxShadow: "0 0 0 2px #7b5cfa" }, { backgroundColor: "#242424", boxShadow: "0 0 0 2px #7b5cfa00" }],
+                { duration: 700, easing: "ease-out" });
+        }
+    }
+}
 
 function onDragStart(e) {
     dragSrcIndex = parseInt(e.currentTarget.dataset.index);
@@ -1737,6 +1770,7 @@ async function onDrop(e) {
     pending.splice(destIndex, 0, moved);
 
     dragSrcIndex = null;
+    movedId      = moved[1];
     if (canEdit) {
         // Renumber in place: prompt IDs (and any open edit tab's link to its run) stay intact
         await api.fetchApi("/queue_workbench/reorder", {
@@ -1747,6 +1781,7 @@ async function onDrop(e) {
         await reorderQueue(pending);
     }
     await refreshQueue();
+    movedId = null;
 }
 
 // ---------------------------------------------------------------------------

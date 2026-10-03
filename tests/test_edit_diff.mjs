@@ -5,8 +5,8 @@ import fs from "node:fs";
 const src = fs.readFileSync(new URL("../web/queue_workbench.js", import.meta.url), "utf8").replace(/^import .*$/mg, "");
 globalThis.window   = { matchMedia: () => ({ matches: true }) };
 globalThis.document = { getElementById: () => null };
-const { diffPrompts, diffWidgets, patchRun, changeLabel, editedRunPayload, editTabName, siblingCandidates, validationMessage, resubmitBody, detailHtml, groupInfo } = new Function("app", "api",
-    src + "\nreturn { diffPrompts, diffWidgets, patchRun, changeLabel, editedRunPayload, editTabName, siblingCandidates, validationMessage, resubmitBody, detailHtml, groupInfo };")({ registerExtension() {} }, { addEventListener() {} });
+const { diffPrompts, diffWidgets, patchRun, changeLabel, editedRunPayload, editTabName, siblingCandidates, validationMessage, resubmitBody, detailHtml, groupInfo, slotShifts } = new Function("app", "api",
+    src + "\nreturn { diffPrompts, diffWidgets, patchRun, changeLabel, editedRunPayload, editTabName, siblingCandidates, validationMessage, resubmitBody, detailHtml, groupInfo, slotShifts };")({ registerExtension() {} }, { addEventListener() {} });
 
 const TEXT = "summary: a woman walks through a sunlit flower shop, smiling at the camera";
 function run(id, { seed = 1, text = TEXT, steps = 12, lora = true } = {}) {
@@ -137,6 +137,13 @@ test("change labels read like the chips", () => {
     const off = edit(a, p => { p["23"].inputs.lora_1.on = false; p["24"].inputs.value = 14; });
     const labels = diffPrompts(a[2], off[2]).changes.map(c => changeLabel(c, off[2]));
     assert.deepEqual(labels, ["watercolor_v2: 1.0 → off", "Steps: 12 → 14"]);
+});
+
+test("rows that changed slots slide from their old place; new, gone and unmoved rows don't", () => {
+    const before = new Map([["a", 0], ["b", 64], ["c", 128], ["gone", 192], ["d", 256]]);
+    const after  = new Map([["c", 0], ["a", 64], ["b", 128], ["new", 192], ["d", 256]]);
+    assert.deepEqual([...slotShifts(before, after)], [["c", 128], ["a", -64], ["b", -64]]);
+    assert.equal(slotShifts(after, after).size, 0);
 });
 
 let failed = 0;
