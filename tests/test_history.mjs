@@ -137,6 +137,17 @@ test("detail card of a finished run lists its outputs and the escaped error; liv
     assert.ok(!live.includes("Outputs") && !live.includes("Inputs") && live.includes("filename=input.png"));
 });
 
+test("a retry after out-of-memory is marked in its row and detail card", () => {
+    const item = histItem("b", "Wf");
+    item[3].qm_retry_of = "aaaaaaaa-1111-2222-3333-444444444444";
+    const run = { id: 2, item, outputs: OUT, status: status("success") };
+    const info = groupInfo([item]).get("b");
+    assert.ok(historyRowHtml(run, info).includes("↻"));
+    assert.ok(detailHtml(item, info, "✓ Finished", run).includes("Retry of aaaaaaaa"));
+    const plain = { id: 3, item: histItem("c", "Wf"), outputs: OUT, status: status("success") };
+    assert.ok(!historyRowHtml(plain, groupInfo([plain.item]).get("c")).includes("↻"));
+});
+
 let failed = 0;
 for (const [name, fn] of tests) {
     try { fn(); console.log(`ok   ${name}`); } catch (e) { failed++; console.log(`FAIL ${name}\n     ${e.message}`); }

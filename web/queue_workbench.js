@@ -8,7 +8,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-const BUILD = "2026-10-03d";
+const BUILD = "2026-10-03e";
 
 // Stale-JS detection (PWA caches extension JS hard): compare this bundle's BUILD
 // against the stamp the backend reads from web/queue_workbench.js ON DISK.
@@ -824,7 +824,7 @@ function historyRowHtml(run, info) {
         <span style="display:flex;align-items:center;gap:6px;overflow:hidden;flex:1;min-width:0;">
             <span style="display:flex;gap:3px;flex-shrink:0;">${out ? thumbHtml(out, 44, OUTPUT_BORDER) : ""}${out && !info.thumbs.length ? "" : thumbsHtml(info.thumbs, 44, "#444", "#333")}</span>
             <span style="display:flex;flex-direction:column;gap:2px;overflow:hidden;min-width:0;">
-                <span style="color:#aaa;font-size:12px;white-space:nowrap;"><span style="color:${f.color};">${f.mark}</span> ${esc(f.text)} <span style="color:#666;font-size:11px;">· <span class="qm-load-workflow" style="color:#7b9cfa;cursor:pointer;text-decoration:underline;text-decoration-style:dotted;" title="Load this workflow onto canvas">${shortId(run.item[1])}</span></span></span>
+                <span style="color:#aaa;font-size:12px;white-space:nowrap;">${run.item[3]?.qm_retry_of ? `<span title="Queued again after running out of memory" style="color:#e3ad54;">↻</span> ` : ""}<span style="color:${f.color};">${f.mark}</span> ${esc(f.text)} <span style="color:#666;font-size:11px;">· <span class="qm-load-workflow" style="color:#7b9cfa;cursor:pointer;text-decoration:underline;text-decoration-style:dotted;" title="Load this workflow onto canvas">${shortId(run.item[1])}</span></span></span>
                 ${nameHtml(workflowName(run.item))}
             </span>
         </span>
@@ -874,7 +874,7 @@ function detailHtml(item, info, where, run = null) {
                 ${canEdit && where.startsWith("#") ? `<button class="qm-detail-edit" style="${BTN}padding:2px 10px;">✎ Edit</button>` : ""}
             </span>
         </div>
-        <div style="margin-top:2px;font-size:11px;color:#777;">Queued ${esc(queuedAt(item))}<span style="margin-left:10px;font-family:monospace;">${esc(item[1])}</span></div>
+        <div style="margin-top:2px;font-size:11px;color:#777;">Queued ${esc(queuedAt(item))}<span style="margin-left:10px;font-family:monospace;">${esc(item[1])}</span>${item[3]?.qm_retry_of ? `<span style="margin-left:10px;color:#e3ad54;">↻ Retry of ${esc(shortId(item[3].qm_retry_of))}</span>` : ""}</div>
         ${error ? `<div style="margin-top:8px;max-height:120px;overflow-y:auto;color:#f88;font-size:12px;white-space:pre-wrap;word-break:break-word;user-select:text;">${esc([error.node, error.message].filter(Boolean).join(": "))}</div>` : ""}
         ${gallery("Outputs", outputs, OUTPUT_BORDER)}
         ${gallery(outputs.length ? "Inputs" : "", info.thumbs, "#3a3a3a")}

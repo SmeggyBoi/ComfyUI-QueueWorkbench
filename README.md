@@ -33,6 +33,9 @@ runs of the same workflow apart, and fix a queued run without re-queueing it.
 - **Survives restarts.** Pending and paused runs are mirrored to a local SQLite
   file. After a restart or crash they show up as *Saved from previous session*,
   where you can restore or discard them. Nothing re-runs on its own.
+- **Unattended queues.** A run that fails because the GPU ran out of memory is
+  queued again once, right away. With ntfy configured, a *Queue finished*
+  summary arrives when two or more runs are done.
 - **Live preview everywhere.** The running row shows the sampler preview, also
   on devices that didn't queue the run (e.g. your phone on the same server).
 - **Optional push notification** via [ntfy](https://ntfy.sh) when a generation
@@ -97,7 +100,8 @@ Push notifications are off unless you configure an ntfy topic. Copy
 |---|---|
 | `ntfy_url` | Full topic URL, e.g. `https://ntfy.sh/my-secret-topic` or your own server |
 | `public_url` | The address your phone uses to reach ComfyUI. If set, the notification attaches the finished file and gets an *Open in browser* button. |
-| `ntfy_quiet_seconds` | Waits this long after the last finished run before notifying. Workflows that finish in several passes then send one notification for the final file. Default 90. |
+| `ntfy_quiet_seconds` | Waits this long after the last finished run before notifying. Workflows that finish in several passes then send one notification for the final file. Default 90. The *Queue finished* summary (two or more runs) waits for the queue to stay empty this long. |
+| `oom_retry` | Queue a run again once, at the front, when it fails because the GPU ran out of memory. Never twice, not while the queue is paused. Default `true`. |
 
 Environment variables `QUEUE_WORKBENCH_NTFY_URL` and
 `QUEUE_WORKBENCH_PUBLIC_URL` override the file. Restart ComfyUI after changes.

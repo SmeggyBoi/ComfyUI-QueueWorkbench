@@ -7,6 +7,8 @@
 - Pending runs slide to their new place when the order changes (drag and drop, a reorder on another device, the next run starting); the run you dragged flashes briefly.
 - While dragging, the row the run would move to is highlighted red (replaces the flickering drop line).
 - Reorder on phones: long-press ⠿ and drag (same red target, slide and flash), or ⤒ Move to top in a pending run's detail.
+- A run that fails because the GPU ran out of memory is queued again once, right away (`oom_retry`, on by default; not while paused). History marks the retry with ↻.
+- With ntfy configured, a *Queue finished* summary (runs, ✓ / ✕, total time, failed runs, last output) arrives after two or more runs.
 
 ## 1.0.0
 
