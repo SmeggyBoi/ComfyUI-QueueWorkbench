@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-queueworkbench"
 description = "A queue panel for ComfyUI: tell queued runs apart at a glance, edit queued runs in place, drag to reorder, pause, and keep the queue across restarts."
-version = "1.0.0"
+version = "1.1.0"
 license = { file = "LICENSE" }
 dependencies = []
 

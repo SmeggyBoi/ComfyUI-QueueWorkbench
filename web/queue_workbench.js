@@ -8,7 +8,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-const BUILD = "2026-10-01b";
+const BUILD = "2026-10-03a";
 
 // Stale-JS detection (PWA caches extension JS hard): compare this bundle's BUILD
 // against the stamp the backend reads from web/queue_workbench.js ON DISK.
@@ -36,6 +36,7 @@ let queueData      = { queue_running: [], queue_pending: [] };
 let livePreviewUrl = null;   // current object URL for the latest preview frame
 let isGenerating   = false;  // true while a job is actively running
 let savedJobs      = [];     // backlog persisted from a previous session
+let activeTab      = "queue"; // panel tab: "queue" | "history"
 
 // ---------------------------------------------------------------------------
 // API helpers
@@ -190,6 +191,9 @@ async function setPaused(val) {
 // ---------------------------------------------------------------------------
 // Panel UI
 // ---------------------------------------------------------------------------
+const TAB        = "background:none;border:none;border-bottom:2px solid transparent;color:#888;padding:4px 10px 6px;cursor:pointer;font-size:12px;";
+const TAB_ACTIVE = "color:#ddd;border-bottom-color:#7b5cfa;";
+
 function createPanel() {
     const panel = document.createElement("div");
     panel.id    = "qm-panel";
@@ -318,14 +322,33 @@ function createPanel() {
     pendingEl.id = "qm-pending";
     pendingEl.style.cssText = `overflow-y: auto; flex: 1; padding: 0 10px 10px;`;
 
-    panel.appendChild(header);
-    panel.appendChild(statusBar);
-    panel.appendChild(savedSection);
-    panel.appendChild(runningLabel);
-    panel.appendChild(runningEl);
-    panel.appendChild(pendingLabel);
-    panel.appendChild(pendingEl);
+    // Tabs: the live queue and the finished runs
+    const tabs = document.createElement("div");
+    tabs.id = "qm-tabs";
+    tabs.style.cssText = `display:flex;gap:4px;padding:6px 10px 0;background:#1e1e1e;border-bottom:1px solid #333;flex-shrink:0;`;
+    tabs.innerHTML = `<button data-tab="queue"></button><button data-tab="history"></button>`;
+    tabs.addEventListener("click", (e) => {
+        const tab = e.target.closest("button[data-tab]")?.dataset.tab;
+        if (tab && tab !== activeTab) setTab(tab);
+    });
+
+    const queueView = document.createElement("div");
+    queueView.id = "qm-queue-view";
+    queueView.style.cssText = `display:flex;flex-direction:column;flex:1;min-height:0;`;
+    queueView.append(savedSection, runningLabel, runningEl, pendingLabel, pendingEl);
+
+    const historyView = document.createElement("div");
+    historyView.id = "qm-history-view";
+    historyView.style.cssText = `display:none;flex-direction:column;flex:1;min-height:0;overflow-y:auto;padding:4px 10px 10px;`;
+    historyView.innerHTML = `
+        <div id="qm-history"></div>
+        <button id="qm-history-more" style="display:none;${BTN}width:100%;margin-top:6px;">Show more</button>`;
+    historyView.querySelector("#qm-history-more").addEventListener("click", () =>
+        loadMoreHistory().catch(e => console.warn("[QueueWorkbench] Failed to fetch history:", e)));
+
+    panel.append(header, statusBar, tabs, queueView, historyView);
     document.body.appendChild(panel);
+    updateTabs();
 
     // Saved-section bulk actions
     savedHeader.querySelector("#qm-restore-all").addEventListener("click", async () => {
@@ -340,6 +363,26 @@ function createPanel() {
     });
 
     return panel;
+}
+
+function setTab(tab) {
+    activeTab = tab;
+    hideDetailCard();
+    updateTabs();
+    if (tab === "history") refreshHistory();
+}
+
+function updateTabs() {
+    const queueView   = document.getElementById("qm-queue-view");
+    const historyView = document.getElementById("qm-history-view");
+    if (!queueView || !historyView) return;
+    queueView.style.display   = activeTab === "queue" ? "flex" : "none";
+    historyView.style.display = activeTab === "history" ? "flex" : "none";
+    const count = (queueData.queue_running || []).length + (queueData.queue_pending || []).length;
+    for (const btn of document.querySelectorAll("#qm-tabs button[data-tab]")) {
+        btn.textContent   = btn.dataset.tab === "queue" ? `Queue (${count})` : "History";
+        btn.style.cssText = TAB + (btn.dataset.tab === activeTab ? TAB_ACTIVE : "");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -862,11 +905,11 @@ function detailCard() {
     return card;
 }
 
-function showDetailCard(row, item, info, where) {
+function showDetailCard(row, item, info, where, run = null) {
     clearTimeout(cardHideTimer);
     const card      = detailCard();
     const wasHidden = card.style.display === "none";
-    card.innerHTML  = detailHtml(item, info, where);
+    card.innerHTML  = detailHtml(item, info, where, run);
     card.querySelector(".qm-detail-edit")?.addEventListener("click", e => { e.stopPropagation(); editQueuedRun(item).catch(console.error); });
     cardItemId      = item[1];
     // Left of the panel; rows in the lower half anchor the card's bottom so it grows upward
@@ -897,9 +940,9 @@ function hideDetailCard() {
     if (card) card.style.display = "none";
 }
 
-function attachDetail(el, item, info, rerender, where) {
+function attachDetail(el, item, info, rerender, where, run = null) {
     if (HOVER) {
-        el.addEventListener("mouseenter", () => showDetailCard(el, item, info, where));
+        el.addEventListener("mouseenter", () => showDetailCard(el, item, info, where, run));
         el.addEventListener("mouseleave", scheduleHideCard);
         return;
     }
@@ -910,7 +953,7 @@ function attachDetail(el, item, info, rerender, where) {
     if (expandedId === item[1]) {
         const detail = document.createElement("div");
         detail.style.cssText = "width:100%;margin-top:8px;padding-top:10px;border-top:1px solid #3a3a3a;font-size:12px;color:#bbb;cursor:auto;user-select:text;";
-        detail.innerHTML = detailHtml(item, info, where);
+        detail.innerHTML = detailHtml(item, info, where, run);
         detail.querySelector(".qm-detail-edit")?.addEventListener("click", e => { e.stopPropagation(); editQueuedRun(item).catch(console.error); });
         // Scrolling / selecting the prompt shouldn't collapse the row
         detail.addEventListener("click", e => e.stopPropagation());
@@ -1332,8 +1375,10 @@ function renderQueue() {
         isPaused, expandedId, canEdit, Object.keys(workflowNames).length]);
     if (renderKey === lastRenderKey) return;
     lastRenderKey = renderKey;
-    // Keep an open hover card across re-renders while its run is still queued
-    if (cardItemId && ![...running, ...pending, ...savedJobs].some(it => it[1] === cardItemId)) hideDetailCard();
+    updateTabs();
+    // Keep an open hover card across re-renders while its run is still listed
+    const listed = [...running, ...pending, ...savedJobs, ...historyRuns.map(r => r.item)];
+    if (cardItemId && !listed.some(it => it[1] === cardItemId)) hideDetailCard();
     const info = groupInfo([...running, ...pending]);
 
     // Status bar
@@ -1497,6 +1542,143 @@ function renderQueue() {
 }
 
 // ---------------------------------------------------------------------------
+// History tab — finished runs persisted by the backend (persistence.py), newest
+// first. Listed runs carry a cut-down workflow; loading or re-queueing a run
+// fetches its full entry.
+// ---------------------------------------------------------------------------
+let historyRuns     = [];    // { id, item, outputs, status }, newest first
+let historyMore     = false; // older runs exist beyond the loaded ones
+let historyLoaded   = false;
+let historyNewestId = 0;     // poll cursors, kept apart from the list so deleting rows never moves them
+let historyOldestId = null;
+let historyBusy     = false;
+let lastHistoryKey  = null;
+
+async function fetchHistory(query) {
+    const res  = await api.fetchApi(`/queue_workbench/history?${query}`);
+    const data = await res.json();
+    const runs = data.runs.map(r => ({ id: r.id, item: r.prompt, outputs: r.outputs || {}, status: r.status }));
+    for (const r of runs) {
+        historyNewestId = Math.max(historyNewestId, r.id);
+        historyOldestId = historyOldestId === null ? r.id : Math.min(historyOldestId, r.id);
+    }
+    return { runs, more: data.more };
+}
+
+// First page on first use, afterwards only the runs that finished since
+async function refreshHistory() {
+    if (historyBusy) return;
+    historyBusy = true;
+    try {
+        if (!historyLoaded) {
+            const { runs, more } = await fetchHistory("limit=50");
+            historyRuns   = runs;
+            historyMore   = more;
+            historyLoaded = true;
+        } else {
+            const { runs } = await fetchHistory(`after=${historyNewestId}`);
+            if (runs.length) historyRuns = mergeNewRuns(historyRuns, runs);
+        }
+    } catch (e) {
+        console.warn("[QueueWorkbench] Failed to fetch history:", e);   // e.g. backend not restarted since updating
+    } finally {
+        historyBusy = false;
+    }
+    renderHistory();   // also on failure, so the empty state shows
+}
+
+async function loadMoreHistory() {
+    const { runs, more } = await fetchHistory(`limit=50&before=${historyOldestId}`);
+    historyRuns = [...historyRuns, ...runs];
+    historyMore = more;
+    renderHistory();
+}
+
+async function fullHistoryItem(run) {
+    const res = await api.fetchApi(`/queue_workbench/history/${encodeURIComponent(run.item[1])}`);
+    if (!res.ok) throw new Error("This run is no longer in the history.");
+    return (await res.json()).run.prompt;
+}
+
+async function requeueRun(run) {
+    const item = await fullHistoryItem(run);
+    const body = requeueBody(item, api.clientId);
+    const res  = await api.fetchApi("/prompt", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        toast("error", "Couldn't queue the run again", validationMessage(data, [{ prompt_id: data.prompt_id, prompt: body.prompt }]));
+        return;
+    }
+    toast("success", "Queued again", workflowName(item) || undefined);
+    await refreshQueue();
+}
+
+async function deleteHistoryRun(run) {
+    const res = await api.fetchApi("/queue_workbench/history/delete", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt_ids: [run.item[1]] }),
+    });
+    if (!res.ok) {
+        toast("error", "Couldn't remove the run from the history");
+        return;
+    }
+    if (cardItemId === run.item[1]) hideDetailCard();
+    historyRuns = historyRuns.filter(r => r !== run);
+    renderHistory();
+}
+
+function renderHistory() {
+    const list = document.getElementById("qm-history");
+    const more = document.getElementById("qm-history-more");
+    if (!list || !more) return;
+    const key = JSON.stringify([historyRuns.map(r => r.id), historyMore, expandedId, Object.keys(workflowNames).length]);
+    if (key === lastHistoryKey) return;
+    lastHistoryKey = key;
+    more.style.display = historyMore ? "block" : "none";
+    list.innerHTML = "";
+    if (historyRuns.length === 0) {
+        list.innerHTML = `<div style="color:#555;padding:4px 4px;font-size:12px;">No finished runs yet</div>`;
+        return;
+    }
+    const info = groupInfo(historyRuns.map(r => r.item));
+    for (const run of historyRuns) {
+        const id     = run.item[1];
+        const f      = finishedInfo(run);
+        const failed = f.state === "error";
+        const el     = document.createElement("div");
+        el.style.cssText = `
+            background: ${failed ? "#2a1f1f" : "#242424"};
+            border: 1px solid ${failed ? "#4a2a2a" : "#3a3a3a"};
+            border-left: 3px solid ${stripeColor(groupKey(run.item))};
+            border-radius: 5px;
+            padding: 6px 10px;
+            margin: 3px 0;
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            justify-content: space-between;
+            min-height: 58px;
+        `;
+        el.innerHTML = historyRowHtml(run, info.get(id));
+        el.querySelector(".qm-load-workflow").addEventListener("click", (e) => {
+            e.stopPropagation();
+            fullHistoryItem(run).then(loadWorkflowFromItem).catch(err => toast("error", "Couldn't load the run", err.message));
+        });
+        el.querySelector(".qm-requeue-btn").addEventListener("click", (e) => {
+            e.stopPropagation();
+            requeueRun(run).catch(err => toast("error", "Couldn't queue the run again", err.message));
+        });
+        el.querySelector(".qm-history-delete").addEventListener("click", (e) => {
+            e.stopPropagation();
+            deleteHistoryRun(run).catch(err => toast("error", "Couldn't remove the run from the history", err.message));
+        });
+        attachDetail(el, run.item, info.get(id), renderHistory, `${f.mark} ${f.label} ${f.text}`.trim(), run);
+        list.appendChild(el);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Drag-and-drop
 // ---------------------------------------------------------------------------
 let dragSrcIndex = null;
@@ -1572,6 +1754,7 @@ async function refreshQueue() {
     } catch (e) {
         console.warn("[QueueWorkbench] Failed to fetch queue:", e);
     }
+    if (panelOpen && activeTab === "history") refreshHistory();
 }
 
 function startPolling() {
@@ -1597,7 +1780,7 @@ function togglePanel() {
     if (panelOpen) {
         startPolling();
         refreshSaved();   // refresh the previous-session backlog when opened
-        Promise.all([refreshWorkflowNames(), probeEditSupport()]).then(() => { renderQueue(); renderSaved(); });
+        Promise.all([refreshWorkflowNames(), probeEditSupport()]).then(() => { renderQueue(); renderSaved(); renderHistory(); });
     } else {
         stopPolling();
         hideDetailCard();

@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.0
+
+- History tab: the last 200 finished runs, newest first, kept across restarts. Same rows as the queue plus the first output, a ✓ / ✕ / ⏹ status mark, finish time and duration; the detail card shows every output and the error of a failed run.
+- Queue a finished run again (same settings, same seed) or remove it from the history.
+
 ## 1.0.0
 
 First public release.

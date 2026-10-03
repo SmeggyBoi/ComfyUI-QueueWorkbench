@@ -25,6 +25,11 @@ runs of the same workflow apart, and fix a queued run without re-queueing it.
   and other values.
 - **Reorder, pause, delete.** Drag rows to reorder (runs keep their IDs), pause
   the queue while the current run finishes, delete single runs.
+- **History.** The *History* tab lists the last 200 finished runs, newest first,
+  with the same rows as the queue plus the first output, a ✓ / ✕ / ⏹ status mark,
+  finish time and duration. The detail card shows every output and, for a failed
+  run, the error. Queue a run again with ⤴ (same settings, same seed) or remove it
+  with ✕. The history survives restarts.
 - **Survives restarts.** Pending and paused runs are mirrored to a local SQLite
   file. After a restart or crash they show up as *Saved from previous session*,
   where you can restore or discard them. Nothing re-runs on its own.
@@ -64,6 +69,9 @@ red banner at the top tells you so.
 | Reorder | Drag a row onto another |
 | Pause / resume | *Pause* in the panel header. The running job finishes; nothing else starts until you resume. |
 | Restore after a restart | *Saved from previous session* section: restore one or all, or discard |
+| See finished runs | *History* tab; *Show more* loads older ones |
+| Run a finished run again | ⤴ on its history row (same seed) |
+| Remove a run from the history | ✕ on its history row (output files stay) |
 
 ### How editing works
 
@@ -153,17 +161,20 @@ including this panel and its live preview.
   don't re-run on update.
 - A run queued with "queue selected output nodes" runs all outputs after it has
   been edited.
+- Queueing a finished run again doesn't carry your Comfy.org login, so runs with
+  paid API nodes fail when queued again from the history.
 
 ## Privacy
 
 Everything stays on your machine. The only network request this extension makes
 is the ntfy notification, and only if you configure it. The persistence file
-`queue_persist.db` (in this folder) contains your queued prompts and workflows.
+`queue_persist.db` (in this folder) contains your queued prompts and workflows, and those of your last 200 finished runs.
 
 ## Development
 
 ```bash
 node tests/test_edit_diff.mjs                 # frontend logic (Node 18+)
+node tests/test_history.mjs                   # history tab logic
 python -m unittest discover -s tests -v       # backend logic (needs aiohttp)
 ```
 
