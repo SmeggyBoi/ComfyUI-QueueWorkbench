@@ -164,6 +164,9 @@ def _fire_ntfy():
         out = _best_output[0]
         _best_output[0] = None
         _ntfy_timer[0] = None
+    if not out:
+        _send_ntfy("Generation complete ✅", "Your ComfyUI workflow finished.")
+        return
     fname = out[0]
     if not _config["public_url"]:
         _send_ntfy("Generation complete ✅", f"Finished: {fname}")
