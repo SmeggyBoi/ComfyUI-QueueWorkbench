@@ -463,6 +463,9 @@ async function loadWorkflowFromItem(item) {
 const MEDIA_RE = /\.(png|jpe?g|webp|bmp|gif|tiff?|mp4|webm|mov|mkv|avi)$/i;
 const VIDEO_RE = /\.(mp4|webm|mov|mkv|avi)$/i;
 
+const viewUrl  = (filename, type, subfolder) =>
+    `/view?filename=${encodeURIComponent(filename)}&type=${type}&subfolder=${encodeURIComponent(subfolder)}`;
+
 // "sub/file.png [output]" -> { subfolder: "sub", filename: "file.png", type: "output" }
 function mediaRef(value) {
     if (typeof value !== "string") return null;
@@ -482,7 +485,7 @@ function extractThumbnails(prompt) {
             seen.add(value);
             const type = ref.type || (node.class_type === "FramePickerNode" ? "output" : "input");
             results.push({
-                url:   `/view?filename=${encodeURIComponent(ref.filename)}&type=${type}&subfolder=${encodeURIComponent(ref.subfolder)}`,
+                url:   viewUrl(ref.filename, type, ref.subfolder),
                 label: ref.filename,
                 video: VIDEO_RE.test(ref.filename),
             });
@@ -548,15 +551,19 @@ function stripeColor(key) {
     return `hsl(${h % 360} 55% 55%)`;
 }
 
-// qm_queued_at survives reorder/pause (which re-POST and reset create_time)
-function queuedAt(item) {
-    const t = item[3]?.extra_pnginfo?.workflow?.extra?.qm_queued_at ?? item[3]?.create_time;
-    if (!t) return "";
+// "14:32" today, "02.10 14:32" on other days
+function fmtTime(t) {
     const d    = new Date(t);
     const time = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     return d.toDateString() === new Date().toDateString()
         ? time
         : `${d.toLocaleDateString([], { day: "2-digit", month: "2-digit" })} ${time}`;
+}
+
+// qm_queued_at survives reorder/pause (which re-POST and reset create_time)
+function queuedAt(item) {
+    const t = item[3]?.extra_pnginfo?.workflow?.extra?.qm_queued_at ?? item[3]?.create_time;
+    return t ? fmtTime(t) : "";
 }
 
 // Prompt-like text: several words, not a model filename, not serialized JSON (e.g. crop boxes)
@@ -695,9 +702,105 @@ function chipsRowHtml(chips) {
     return `<div style="width:100%;display:flex;flex-wrap:wrap;gap:3px;margin-top:5px;">${shown.map(c => chipHtml(c)).join("")}${chips.length > shown.length ? chipHtml({ cat: "other", text: `+${chips.length - shown.length}` }) : ""}</div>`;
 }
 
-// where: "#3 of 22" / "Running" / "Saved"
-function detailHtml(item, info, where) {
-    const prompt = item[2] || {};
+// ---------------------------------------------------------------------------
+// Finished runs (History tab) — status, timing and outputs read from a ComfyUI
+// history entry, the row built from them, and the body to queue a run again.
+// A run is { id, item, outputs, status }; item has the queue-item shape.
+// ---------------------------------------------------------------------------
+const OUTPUT_BORDER = "#7b5cfa";
+const STATUS_MARKS  = {
+    success:     { mark: "✓", color: "#6f6", label: "Finished" },
+    error:       { mark: "✕", color: "#f66", label: "Failed" },
+    interrupted: { mark: "⏹", color: "#999", label: "Interrupted" },
+};
+
+// ComfyUI reports an interrupt as status_str "error" with an execution_interrupted message
+function runResult(status) {
+    const messages = status?.messages || [];
+    const find     = type => messages.find(([t]) => t === type)?.[1];
+    const end      = find("execution_success") || find("execution_error") || find("execution_interrupted");
+    const error    = find("execution_error");
+    return {
+        state:      !status ? null : status.status_str === "success" ? "success" : find("execution_interrupted") ? "interrupted" : "error",
+        startedAt:  find("execution_start")?.timestamp ?? null,
+        finishedAt: end?.timestamp ?? null,
+        error:      error ? { node: error.node_type, message: error.exception_message } : null,
+    };
+}
+
+function fmtDuration(ms) {
+    const s   = Math.round(ms / 1000);
+    const pad = n => String(n).padStart(2, "0");
+    if (s < 60)   return `${s}s`;
+    if (s < 3600) return `${Math.floor(s / 60)}m ${pad(s % 60)}s`;
+    return `${Math.floor(s / 3600)}h ${pad(Math.floor(s / 60) % 60)}m`;
+}
+
+// Mark, label and "14:32 · 3m 12s" of a finished run
+function finishedInfo(run) {
+    const result = runResult(run.status);
+    const look   = STATUS_MARKS[result.state] || { mark: "", color: "#888", label: "Finished" };
+    const { startedAt, finishedAt } = result;
+    const text   = [finishedAt && fmtTime(finishedAt), startedAt && finishedAt && fmtDuration(finishedAt - startedAt)]
+        .filter(Boolean).join(" · ");
+    return { ...result, ...look, text };
+}
+
+// Every output file of a run (any output list of {filename, subfolder, type}); saved
+// outputs before temp previews such as image-compare halves
+function outputMedia(outputs) {
+    const seen = new Set();
+    return Object.values(outputs || {}).flatMap(node => Object.values(node || {}))
+        .filter(Array.isArray).flat()
+        .filter(f => typeof f?.filename === "string" && MEDIA_RE.test(f.filename))
+        .map(f => ({ ...f, type: f.type || "output" }))
+        .sort((a, b) => (a.type !== "output") - (b.type !== "output"))
+        .map(f => ({ url: viewUrl(f.filename, f.type, f.subfolder || ""), label: f.filename, video: VIDEO_RE.test(f.filename) }))
+        .filter(m => !seen.has(m.url) && seen.add(m.url));
+}
+
+// A finished run queued again as a new run: same graph and seed. The server picks the
+// prompt_id, the queue time is stamped fresh and the live preview goes to clientId.
+function requeueBody(item, clientId) {
+    const { client_id, create_time, ...extra } = structuredClone(item[3] || {});
+    const workflow = extra.extra_pnginfo?.workflow;
+    if (workflow) workflow.extra = { ...workflow.extra, qm_queued_at: Date.now() };
+    return { prompt: item[2], extra_data: extra, client_id: clientId };
+}
+
+// New runs (newest first) go on top; a prompt_id that finished again keeps only its newest run
+function mergeNewRuns(runs, incoming) {
+    const ids = new Set(incoming.map(r => r.item[1]));
+    return [...incoming, ...runs.filter(r => !ids.has(r.item[1]))];
+}
+
+function historyRowHtml(run, info) {
+    const f   = finishedInfo(run);
+    const out = outputMedia(run.outputs)[0];
+    return `
+        <span style="display:flex;align-items:center;gap:6px;overflow:hidden;flex:1;min-width:0;">
+            <span style="display:flex;gap:3px;flex-shrink:0;">${out ? thumbHtml(out, 44, OUTPUT_BORDER) : ""}${out && !info.thumbs.length ? "" : thumbsHtml(info.thumbs, 44, "#444", "#333")}</span>
+            <span style="display:flex;flex-direction:column;gap:2px;overflow:hidden;min-width:0;">
+                <span style="color:#aaa;font-size:12px;white-space:nowrap;"><span style="color:${f.color};">${f.mark}</span> ${esc(f.text)} <span style="color:#666;font-size:11px;">· <span class="qm-load-workflow" style="color:#7b9cfa;cursor:pointer;text-decoration:underline;text-decoration-style:dotted;" title="Load this workflow onto canvas">${shortId(run.item[1])}</span></span></span>
+                ${nameHtml(workflowName(run.item))}
+            </span>
+        </span>
+        <span style="display:flex;gap:4px;flex-shrink:0;">
+            <button class="qm-requeue-btn" title="Queue this run again (same seed)" style="background:#2a7a2a;border:none;color:#fff;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:11px;">⤴</button>
+            <button class="qm-history-delete" title="Remove from history" style="background:#5a1a1a;border:none;color:#f88;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:11px;">✕</button>
+        </span>
+        ${chipsRowHtml(info.chips)}`;
+}
+
+// where: "#3 of 22" / "Running" / "Saved" / "✓ Finished 14:32 · 3m 12s"; run (History tab)
+// adds the run's outputs and error
+function detailHtml(item, info, where, run = null) {
+    const prompt  = item[2] || {};
+    const outputs = run ? outputMedia(run.outputs) : [];
+    const error   = run ? runResult(run.status).error : null;
+    const gallery = (label, thumbs, border) => thumbs.length ? `
+        ${label ? `<div style="margin-top:12px;font-size:11px;color:#8a8a8a;">${label}</div>` : ""}
+        <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:${label ? 4 : 12}px;">${thumbs.map(t => thumbHtml(t, 112, border)).join("")}</div>` : "";
     // Unique non-zero seeds (nodes with per-clip seed slots often leave unused ones at 0)
     const seeds  = [...new Set(Object.values(prompt).flatMap(n => Object.entries(n?.inputs || {}))
         .filter(([k, v]) => /seed/i.test(k) && typeof v === "number" && v !== 0).map(([, v]) => v))];
@@ -728,7 +831,9 @@ function detailHtml(item, info, where) {
             </span>
         </div>
         <div style="margin-top:2px;font-size:11px;color:#777;">Queued ${esc(queuedAt(item))}<span style="margin-left:10px;font-family:monospace;">${esc(item[1])}</span></div>
-        ${info.thumbs.length ? `<div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:12px;">${info.thumbs.map(t => thumbHtml(t, 112, "#3a3a3a")).join("")}</div>` : ""}
+        ${error ? `<div style="margin-top:8px;max-height:120px;overflow-y:auto;color:#f88;font-size:12px;white-space:pre-wrap;word-break:break-word;user-select:text;">${esc([error.node, error.message].filter(Boolean).join(": "))}</div>` : ""}
+        ${gallery("Outputs", outputs, OUTPUT_BORDER)}
+        ${gallery(outputs.length ? "Inputs" : "", info.thumbs, "#3a3a3a")}
         ${settings.length ? `<div style="margin-top:8px;">${settings.join("")}</div>` : ""}
         ${texts.join("")}`;
 }
