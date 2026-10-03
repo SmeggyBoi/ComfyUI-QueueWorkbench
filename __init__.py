@@ -19,6 +19,8 @@ import folder_paths
 from aiohttp import web
 from server import PromptServer
 
+from . import oom_retry
+
 WEB_DIRECTORY = "./web"
 NODE_CLASS_MAPPINGS = {}
 NODE_DISPLAY_NAME_MAPPINGS = {}
@@ -29,7 +31,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {}
 # overridden by QUEUE_WORKBENCH_NTFY_URL / QUEUE_WORKBENCH_PUBLIC_URL.
 # ---------------------------------------------------------------------------
 def _load_config():
-    config = {"ntfy_url": "", "public_url": "", "ntfy_quiet_seconds": 90}
+    config = {"ntfy_url": "", "public_url": "", "ntfy_quiet_seconds": 90, "oom_retry": True}
     path = Path(__file__).parent / "config.json"
     if path.exists():
         try:
@@ -195,7 +197,8 @@ def _hooked_send_sync(event, data, sid=None):
                 _pending_outputs.clear()
                 _cancel_ntfy_timer()             # drop any armed success timer from this burst
                 error_msg = data.get("exception_message", "Unknown error") if isinstance(data, dict) else "Unknown error"
-                threading.Thread(target=_send_ntfy, args=("Generation failed ❌", error_msg[:100], "high", "x"),
+                note = oom_retry.failure_note(server.prompt_queue, data, _config["oom_retry"]) if isinstance(data, dict) else ""
+                threading.Thread(target=_send_ntfy, args=("Generation failed ❌", error_msg[:100] + note, "high", "x"),
                                  daemon=True).start()
     except Exception:
         print(f"[QueueWorkbench] event hook error:\n{traceback.format_exc()}")
@@ -308,3 +311,13 @@ try:
     register_edit_routes(server)
 except Exception:
     print(f"[QueueWorkbench] queue edit setup error:\n{traceback.format_exc()}")
+
+# ---------------------------------------------------------------------------
+# Retry a run once after CUDA out-of-memory (see oom_retry.py). Installed after
+# persistence, so its task_done wrapper (mirror + history) runs inside this one.
+# ---------------------------------------------------------------------------
+if _config["oom_retry"]:
+    try:
+        oom_retry.install(server.prompt_queue)
+    except Exception:
+        print(f"[QueueWorkbench] out-of-memory retry setup error:\n{traceback.format_exc()}")

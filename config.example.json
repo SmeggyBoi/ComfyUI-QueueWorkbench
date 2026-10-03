@@ -1,5 +1,6 @@
 {
   "ntfy_url": "",
   "public_url": "",
-  "ntfy_quiet_seconds": 90
+  "ntfy_quiet_seconds": 90,
+  "oom_retry": true
 }

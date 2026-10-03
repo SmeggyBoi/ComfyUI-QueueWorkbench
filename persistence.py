@@ -255,6 +255,12 @@ def delete_history(prompt_ids):
         return conn.execute(f"DELETE FROM history WHERE prompt_id IN ({placeholders})", prompt_ids).rowcount
 
 
+def has_held():
+    """True while the panel holds paused runs, i.e. the queue is paused."""
+    with _db_lock, _connect() as conn:
+        return conn.execute("SELECT 1 FROM saved_jobs WHERE origin='held' LIMIT 1").fetchone() is not None
+
+
 def _record_finished(prompt_queue, prompt_id):
     try:
         entry = prompt_queue.get_history(prompt_id=prompt_id).get(prompt_id)
