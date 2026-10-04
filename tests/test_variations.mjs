@@ -4,9 +4,40 @@ import fs from "node:fs";
 
 const src = fs.readFileSync(new URL("../web/queue_workbench.js", import.meta.url), "utf8").replace(/^import .*$/mg, "");
 globalThis.window   = { matchMedia: () => ({ matches: true }) };
-globalThis.document = { getElementById: () => null };
-const { rerollSeeds, variationBody } = new Function("app", "api",
-    src + "\nreturn { rerollSeeds, variationBody };")({ registerExtension() {} }, { addEventListener() {} });
+globalThis.document = { getElementById: () => null, querySelector: () => null, querySelectorAll: () => [] };
+// A stand-in server for queueVariations: /prompt answers the k-th POST with answer(k), the
+// history route serves historyItems by prompt_id, /queue is empty (the panel's refresh)
+const calls  = [];   // fetched URLs, in order
+const posted = [];   // bodies POSTed to /prompt
+const toasts = [];
+const OK     = { ok: true, body: { prompt_id: "new", number: 1, node_errors: {} } };
+let answer       = () => OK;
+let historyItems = {};
+const api = {
+    clientId: "tab-1",
+    addEventListener() {},
+    async fetchApi(url, options = {}) {
+        calls.push(url);
+        if (url === "/prompt") {
+            posted.push(JSON.parse(options.body));
+            const { ok, body } = answer(posted.length - 1);
+            return { ok, json: async () => body };
+        }
+        if (url === "/queue") return { ok: true, json: async () => ({ queue_running: [], queue_pending: [] }) };
+        const prompt = historyItems[decodeURIComponent(url.replace("/queue_workbench/history/", ""))];
+        return { ok: !!prompt, json: async () => ({ run: { prompt } }) };
+    },
+};
+const app = { registerExtension() {}, extensionManager: { toast: { add: t => toasts.push(t) } } };
+const { rerollSeeds, variationBody, variationCountFrom, queueVariations, detailHtml, groupInfo } = new Function("app", "api",
+    src + "\nreturn { rerollSeeds, variationBody, variationCountFrom, queueVariations, detailHtml, groupInfo };")(app, api);
+
+function server(reply = () => OK) {
+    calls.length = 0;
+    posted.length = 0;
+    toasts.length = 0;
+    answer = reply;
+}
 
 const tests = [];
 const test = (name, fn) => tests.push([name, fn]);
@@ -159,9 +190,93 @@ test("variation body: re-queue shape with the new seeds in graph and workflow; o
     assert.equal(scripted.prompt["3"].inputs.seed, S2);
 });
 
+// A queued run of "Wf": one KSampler, its seed also in the GUI node
+const wfRun = (seed = 111) => run({ "3": { class_type: "KSampler", _meta: { title: "KSampler" }, inputs: { seed, steps: 8 } } },
+    { id: "wf", nodes: [{ id: 3, type: "KSampler", widgets_values: [seed, "randomize", 8] }], extra: { qm_name: "Wf.json" } });
+const historyRun = item => ({ id: 1, item, outputs: {}, status: null });
+
+test("detail cards: 🎲 New seed and 🎲 × on finished runs, ⧉ × on pending and running ones, none on saved ones", () => {
+    const item = wfRun();
+    const info = groupInfo([item]).get("old-id");
+    const finished = detailHtml(item, info, "✓ Finished 14:32 · 3m 12s", historyRun(item));
+    for (const part of [`class="qm-vary-one"`, "🎲 New seed", `class="qm-vary-many"`, "🎲 ×", `class="qm-vary-count"`, `min="1"`, `max="20"`, `value="4"`]) {
+        assert.ok(finished.includes(part), part);
+    }
+    for (const where of ["#2 of 3", "Running"]) {
+        const html = detailHtml(item, info, where);
+        assert.ok(html.includes("⧉ ×") && html.includes(`class="qm-vary-count"`), where);
+        assert.ok(!html.includes("qm-vary-one") && !html.includes("🎲"), where);
+    }
+    assert.ok(!detailHtml(item, info, "Saved").includes("qm-vary"));
+});
+
+test("the ×N field: rounded into 1–20, the previous N when empty or not a number", () => {
+    assert.equal(variationCountFrom("7", 4), 7);
+    assert.equal(variationCountFrom("2.6", 4), 3);
+    assert.equal(variationCountFrom("0", 4), 1);
+    assert.equal(variationCountFrom("-3", 4), 1);
+    assert.equal(variationCountFrom("50", 4), 20);
+    assert.equal(variationCountFrom("", 6), 6);
+    assert.equal(variationCountFrom("e", 6), 6);
+});
+
+test("variations of a finished run: its full entry first, then N posts in a row, each with its own seeds", async () => {
+    server();
+    const full = wfRun();
+    historyItems = { "old-id": full };
+    const listed = [5, "old-id", full[2], { extra_pnginfo: { workflow: { id: "wf", extra: { qm_name: "Wf.json" } } } }, ["9"]];
+    await queueVariations(listed, historyRun(listed), 3);
+    assert.equal(calls[0], "/queue_workbench/history/old-id");
+    assert.equal(posted.length, 3);
+    assert.equal(new Set([111, ...posted.map(b => b.prompt["3"].inputs.seed)]).size, 4, "three new seeds, none the old one");
+    for (const body of posted) {
+        assert.equal(body.client_id, "tab-1");
+        assert.ok(!("prompt_id" in body) && !("number" in body) && !("front" in body), "end of the queue, the server picks the ids");
+        assert.equal(body.extra_data.extra_pnginfo.workflow.nodes[0].widgets_values[0], body.prompt["3"].inputs.seed, "the outputs' workflow has the seed used");
+    }
+    assert.deepEqual(toasts.map(t => [t.severity, t.summary]), [["success", "Queued 3 variations of Wf"]]);
+    assert.equal(calls.at(-1), "/queue", "the panel refreshes");
+    server();
+    await queueVariations(listed, historyRun(listed), 1);
+    assert.equal(toasts[0].summary, "Queued 1 variation of Wf");
+});
+
+test("a rejected variation stops the series and says how many were queued", async () => {
+    const rejected = { ok: false, body: { error: { message: "Prompt outputs failed validation" },
+        node_errors: { "3": { errors: [{ message: "Value bigger than max", details: "seed, 562949953421312 > 4294967295" }], class_type: "KSampler" } } } };
+    server(k => k === 1 ? rejected : OK);
+    await queueVariations(wfRun(), null, 4);
+    assert.equal(posted.length, 2, "nothing after the rejection");
+    assert.deepEqual(toasts.map(t => [t.severity, t.summary, t.detail]), [["error", "Couldn't queue variation 2 of 4",
+        "KSampler: Value bigger than max (seed, 562949953421312 > 4294967295) — 1 of 4 queued"]]);
+    assert.equal(calls.at(-1), "/queue", "the one that got queued shows up");
+    server(() => rejected);
+    await queueVariations(wfRun(), null, 2);
+    assert.equal(posted.length, 1);
+    assert.match(toasts[0].detail, / — 0 of 2 queued$/);
+    assert.ok(!calls.includes("/queue"), "nothing queued, nothing to refresh");
+});
+
+test("a finished run removed from the history meanwhile: an error, nothing queued", async () => {
+    server();
+    historyItems = {};
+    const item = wfRun();
+    await assert.rejects(queueVariations(item, historyRun(item), 4), /no longer in the history/);
+    assert.equal(posted.length, 0);
+});
+
+test("a queued run without seeds is queued as identical runs, and the toast says so", async () => {
+    server();
+    const item = run({ "3": { class_type: "KSampler", inputs: { seed: 0, steps: 8 } } }, { id: "wf", nodes: [], extra: { qm_name: "Wf.json" } });
+    await queueVariations(item, null, 2);
+    assert.equal(calls[0], "/prompt", "a queued run carries its full workflow");
+    assert.deepEqual(posted.map(b => b.prompt), [item[2], item[2]]);
+    assert.deepEqual(toasts.map(t => [t.severity, t.summary]), [["warn", "No seeds found — queued 2 identical runs of Wf"]]);
+});
+
 let failed = 0;
 for (const [name, fn] of tests) {
-    try { fn(); console.log(`ok   ${name}`); } catch (e) { failed++; console.log(`FAIL ${name}\n     ${e.message}`); }
+    try { await fn(); console.log(`ok   ${name}`); } catch (e) { failed++; console.log(`FAIL ${name}\n     ${e.message}`); }
 }
 console.log(`${tests.length - failed}/${tests.length} passed`);
 process.exit(failed ? 1 : 0);

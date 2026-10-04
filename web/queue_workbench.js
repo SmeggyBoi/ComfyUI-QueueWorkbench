@@ -8,7 +8,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-const BUILD = "2026-10-03h";
+const BUILD = "2026-10-03i";
 
 // Stale-JS detection (PWA caches extension JS hard): compare this bundle's BUILD
 // against the stamp the backend reads from web/queue_workbench.js ON DISK.
@@ -886,6 +886,15 @@ function variationBody(item, clientId, random = Math.random) {
     return requeueBody([item[0], item[1], prompt, extra, item[4]], clientId);
 }
 
+const MAX_VARIATIONS = 20;
+let variationCount   = 4;   // N of the detail cards' ×N buttons: the last one entered
+
+// N from the ×N number field: rounded into 1–MAX_VARIATIONS, previous for an empty field
+function variationCountFrom(value, previous) {
+    const n = Math.round(Number(value));
+    return value === "" || !Number.isFinite(n) ? previous : Math.min(MAX_VARIATIONS, Math.max(1, n));
+}
+
 // New runs (newest first) go on top; a prompt_id that finished again keeps only its newest run
 function mergeNewRuns(runs, incoming) {
     const ids = new Set(incoming.map(r => r.item[1]));
@@ -916,6 +925,7 @@ function detailHtml(item, info, where, run = null) {
     const prompt  = item[2] || {};
     const outputs = run ? outputMedia(run.outputs) : [];
     const error   = run ? runResult(run.status).error : null;
+    const queued  = !run && (where === "Running" || where.startsWith("#"));   // a pending or the running run
     const gallery = (label, thumbs, border) => thumbs.length ? `
         ${label ? `<div style="margin-top:12px;font-size:11px;color:#8a8a8a;">${label}</div>` : ""}
         <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:${label ? 4 : 12}px;">${thumbs.map(t => thumbHtml(t, 112, border)).join("")}</div>` : "";
@@ -950,7 +960,12 @@ function detailHtml(item, info, where, run = null) {
             </span>
         </div>
         <div style="margin-top:2px;font-size:11px;color:#777;">Queued ${esc(queuedAt(item))}<span style="margin-left:10px;font-family:monospace;">${esc(item[1])}</span>${item[3]?.qm_retry_of ? `<span style="margin-left:10px;color:#e3ad54;">↻ Retry of ${esc(shortId(item[3].qm_retry_of))}</span>` : ""}</div>
-        ${!run && (where === "Running" || where.startsWith("#")) ? `<div class="qm-est-line" data-est-id="${esc(item[1])}" style="display:none;margin-top:2px;font-size:11px;color:#e3ad54;"></div>` : ""}
+        ${queued ? `<div class="qm-est-line" data-est-id="${esc(item[1])}" style="display:none;margin-top:2px;font-size:11px;color:#e3ad54;"></div>` : ""}
+        ${run || queued ? `<div style="display:flex;align-items:center;gap:6px;margin-top:8px;">
+            ${run ? `<button class="qm-vary-one" title="Queue this run again with new seeds, at the end of the queue" style="${BTN}padding:2px 10px;">🎲 New seed</button>` : ""}
+            <button class="qm-vary-many" title="Queue this many copies with new seeds, at the end of the queue" style="${BTN}padding:2px 10px;">${run ? "🎲" : "⧉"} ×</button>
+            <input class="qm-vary-count" type="number" min="1" max="${MAX_VARIATIONS}" step="1" value="${variationCount}" aria-label="Number of variations" style="width:48px;box-sizing:border-box;background:#141414;border:1px solid #444;color:#ddd;border-radius:5px;padding:2px 4px;font-size:12px;">
+        </div>` : ""}
         ${error ? `<div style="margin-top:8px;max-height:120px;overflow-y:auto;color:#f88;font-size:12px;white-space:pre-wrap;word-break:break-word;user-select:text;">${esc([error.node, error.message].filter(Boolean).join(": "))}</div>` : ""}
         ${gallery("Outputs", outputs, OUTPUT_BORDER)}
         ${gallery(outputs.length ? "Inputs" : "", info.thumbs, "#3a3a3a")}
@@ -982,14 +997,25 @@ function detailCard() {
     return card;
 }
 
-// Buttons inside a detail card (hover card or inline on touch)
-function wireDetailButtons(container, item) {
+// Buttons inside a detail card (hover card or inline on touch); run = the History run shown
+function wireDetailButtons(container, item, run = null) {
     container.querySelector(".qm-detail-edit")?.addEventListener("click", e => { e.stopPropagation(); editQueuedRun(item).catch(console.error); });
     container.querySelector(".qm-detail-top")?.addEventListener("click", e => {
         e.stopPropagation();
         hideDetailCard();
         expandedId = null;
         moveRun(item[1], "top").catch(console.error);
+    });
+    const count = container.querySelector(".qm-vary-count");
+    const vary  = n => queueVariations(item, run, n).catch(err => toast("error", "Couldn't queue variations", err.message));
+    // Like the buttons, the number field keeps its taps: a tap on a row toggles its detail
+    count?.addEventListener("click", e => e.stopPropagation());
+    count?.addEventListener("input", () => { variationCount = variationCountFrom(count.value, variationCount); });
+    container.querySelector(".qm-vary-one")?.addEventListener("click", e => { e.stopPropagation(); vary(1); });
+    container.querySelector(".qm-vary-many")?.addEventListener("click", e => {
+        e.stopPropagation();
+        count.value = variationCount;
+        vary(variationCount);
     });
 }
 
@@ -998,7 +1024,7 @@ function showDetailCard(row, item, info, where, run = null) {
     const card      = detailCard();
     const wasHidden = card.style.display === "none";
     card.innerHTML  = detailHtml(item, info, where, run);
-    wireDetailButtons(card, item);
+    wireDetailButtons(card, item, run);
     applyEstimates();
     cardItemId      = item[1];
     // Left of the panel; rows in the lower half anchor the card's bottom so it grows upward
@@ -1043,7 +1069,7 @@ function attachDetail(el, item, info, rerender, where, run = null) {
         const detail = document.createElement("div");
         detail.style.cssText = "width:100%;margin-top:8px;padding-top:10px;border-top:1px solid #3a3a3a;font-size:12px;color:#bbb;cursor:auto;user-select:text;";
         detail.innerHTML = detailHtml(item, info, where, run);
-        wireDetailButtons(detail, item);
+        wireDetailButtons(detail, item, run);
         // Scrolling / selecting the prompt shouldn't collapse the row
         detail.addEventListener("click", e => e.stopPropagation());
         el.appendChild(detail);
@@ -1905,6 +1931,31 @@ async function requeueRun(run) {
         return;
     }
     toast("success", "Queued again", workflowName(item) || undefined);
+    await refreshQueue();
+}
+
+// count copies of a run at the end of the queue, each with its own new seeds. A History run is
+// fetched in full first (the list carries a cut-down workflow); queued runs carry theirs.
+// Stops at the first copy the server rejects.
+async function queueVariations(item, run, count) {
+    const full   = run ? await fullHistoryItem(run) : item;
+    const name   = workflowName(full) || "this run";
+    const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+    for (let k = 0; k < count; k++) {
+        const body = variationBody(full, api.clientId);
+        const res  = await api.fetchApi("/prompt", {
+            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+        });
+        if (!res.ok) {
+            const data = await res.json().catch(() => ({}));
+            toast("error", `Couldn't queue variation ${k + 1} of ${count}`,
+                `${validationMessage(data, [{ prompt_id: data.prompt_id, prompt: body.prompt }])} — ${k} of ${count} queued`);
+            if (k > 0) await refreshQueue();
+            return;
+        }
+    }
+    if (rerollSeeds(full).changed) toast("success", `Queued ${plural(count, "variation")} of ${name}`);
+    else toast("warn", `No seeds found — queued ${plural(count, "identical run")} of ${name}`);
     await refreshQueue();
 }
 

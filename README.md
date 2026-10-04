@@ -81,6 +81,8 @@ red banner at the top tells you so.
 | Restore after a restart | *Saved from previous session* section: restore one or all, or discard |
 | See finished runs | *History* tab; *Show more* loads older ones |
 | Run a finished run again | ⤴ on its history row (same seed) |
+| Run a finished run with new seeds | *🎲 New seed* in its detail card, or *🎲 ×* next to a number (1–20) for that many variations. They go to the end of the queue. |
+| Duplicate a queued run with new seeds | *⧉ ×* next to a number in a pending or running run's detail card |
 | Remove a run from the history | ✕ on its history row (output files stay) |
 
 ### How editing works
@@ -175,6 +177,9 @@ including this panel and its live preview.
   been edited.
 - Queueing a finished run again doesn't carry your Comfy.org login, so runs with
   paid API nodes fail when queued again from the history.
+- Variations (🎲 / ⧉) always run with their new seeds, but the workflow saved in
+  their outputs keeps the old seed where it can't find the seed's widget, e.g. a
+  seed set by a frontend *Primitive* node or inside a legacy group node.
 
 ## Privacy
 
@@ -187,6 +192,7 @@ is the ntfy notification, and only if you configure it. The persistence file
 ```bash
 node tests/test_edit_diff.mjs                 # frontend logic (Node 18+)
 node tests/test_history.mjs                   # history tab logic
+node tests/test_variations.mjs                # variations (new seeds)
 python -m unittest discover -s tests -v       # backend logic (needs aiohttp)
 ```
 
