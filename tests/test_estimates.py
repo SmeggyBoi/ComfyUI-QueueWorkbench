@@ -10,6 +10,9 @@ import tempfile
 import types
 import unittest
 
+from aiohttp import web
+from aiohttp.test_utils import TestClient, TestServer
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 # The real persistence.py inside its own stand-in package, so estimates.py's relative import
@@ -18,6 +21,7 @@ _pkg = types.ModuleType("qm_est")
 _pkg.__path__ = [str(ROOT)]
 sys.modules["qm_est"] = _pkg
 persistence = importlib.import_module("qm_est.persistence")
+estimates = importlib.import_module("qm_est.estimates")
 
 START = 1_791_000_000_000   # an execution_start timestamp (ms)
 
@@ -175,3 +179,170 @@ class RecentDurationsTest(DbTest):
         self.assertEqual(persistence.recent_durations(None, "wf-1"), [20_000])
         self.assertEqual(persistence.recent_durations("Wf", "wf-2"), [10_000])
         self.assertEqual(persistence.recent_durations(None, None), [])
+
+
+def item(prompt_id, name="Wf", workflow_id="wf-1", prompt=None, number=1):
+    """A queue item as get_current_queue_volatile returns it."""
+    workflow = {"id": workflow_id, "extra": {"qm_name": f"{name}.json"} if name else {}, "nodes": []}
+    return (number, prompt_id, graph() if prompt is None else prompt,
+            {"extra_pnginfo": {"workflow": workflow}, "client_id": "c1"}, ["9"], {})
+
+
+class FakeQueue:
+    def __init__(self, running=(), pending=()):
+        self.running, self.pending = list(running), list(pending)
+
+    def get_current_queue_volatile(self):
+        return list(self.running), list(self.pending)
+
+
+def reset_capture(test):
+    """The progress capture starts empty and is emptied again after the test."""
+    estimates._running = None
+    test.addCleanup(setattr, estimates, "_running", None)
+
+
+class ProgressCaptureTest(unittest.TestCase):
+    def setUp(self):
+        reset_capture(self)
+        self.addCleanup(setattr, estimates, "_now_ms", estimates._now_ms)
+        estimates._now_ms = lambda: START + 999
+
+    def test_follows_the_running_run_through_its_events(self):
+        on = estimates.on_event
+        on("execution_start", {"prompt_id": "a", "timestamp": START})
+        self.assertEqual(estimates.running_state(),
+                         {"prompt_id": "a", "started_at": START, "node": None, "value": None, "max": None})
+        on("executing", {"node": "3", "display_node": "3", "prompt_id": "a"})
+        on("progress", {"value": 12, "max": 30, "prompt_id": "a", "node": "3"})
+        self.assertEqual(estimates.running_state(),
+                         {"prompt_id": "a", "started_at": START, "node": "3", "value": 12, "max": 30})
+        on("executing", {"node": "459:451", "display_node": "459", "prompt_id": "a"})
+        self.assertEqual(estimates.running_state()["node"], "459:451")
+        self.assertIsNone(estimates.running_state()["value"], "a new node starts without progress")
+        on("progress", {"value": 1, "max": 2, "prompt_id": "other", "node": "9"})
+        on("status", {"status": {"exec_info": {"queue_remaining": 1}}})
+        on(1, b"\xff\xd8 preview bytes")
+        self.assertEqual(estimates.running_state()["node"], "459:451")
+        on("execution_success", {"prompt_id": "a", "timestamp": START + 5_000})
+        self.assertIsNone(estimates.running_state())
+
+    def test_every_end_of_a_run_clears_it(self):
+        for event, data in [("execution_error", {"prompt_id": "a"}), ("execution_interrupted", {"prompt_id": "a"}),
+                            ("executing", {"node": None, "prompt_id": "a"})]:
+            estimates.on_event("execution_start", {"prompt_id": "a", "timestamp": START})
+            estimates.on_event(event, data)
+            self.assertIsNone(estimates.running_state(), event)
+
+    def test_a_run_queued_without_a_client_starts_at_its_first_node(self):
+        # ComfyUI sends execution_start/success only for runs with a client_id; executing goes to everyone
+        estimates.on_event("execution_start", {"prompt_id": "old", "timestamp": START - 50_000})
+        estimates.on_event("executing", {"node": "3", "prompt_id": "script"})
+        self.assertEqual(estimates.running_state(),
+                         {"prompt_id": "script", "started_at": START + 999, "node": "3", "value": None, "max": None})
+        estimates.on_event("execution_success", {"prompt_id": "old"})
+        self.assertEqual(estimates.running_state()["prompt_id"], "script", "an older run's end leaves it alone")
+
+    def test_the_state_handed_out_is_a_copy(self):
+        estimates.on_event("execution_start", {"prompt_id": "a", "timestamp": START})
+        estimates.running_state()["node"] = "x"
+        self.assertIsNone(estimates.running_state()["node"])
+
+
+class EstimateTest(DbTest):
+    def record(self, prompt_id, ms, **kw):
+        persistence.record_history(entry(prompt_id, ms=ms, **kw))
+
+    def test_median_of_the_newest_five_successful_runs_with_the_same_settings(self):
+        for i, ms in enumerate([999_000, 100_000, 300_000, 200_000, 500_000, 400_000]):
+            self.record(f"s{i}", ms)
+        self.record("failed", 1_000, state="error")
+        self.record("interrupted", 2_000, state="interrupted")
+        self.record("other-settings", 7_000, prompt=graph(steps=30))
+        self.assertEqual(estimates.estimate(item("q")), {"estimate_ms": 300_000, "basis": "settings", "runs": 5})
+
+    def test_falls_back_to_the_workflows_runs_then_to_none(self):
+        self.record("a", 100_000, prompt=graph(steps=30))
+        self.record("b", 200_000, prompt=graph(steps=20))
+        self.assertEqual(estimates.estimate(item("q")), {"estimate_ms": 150_000, "basis": "workflow", "runs": 2})
+        self.assertIsNone(estimates.estimate(item("q", name="Never run")))
+        self.assertIsNone(estimates.estimate((1, "api", graph(), {"client_id": "c1"}, ["9"], {})), "no workflow at all")
+
+    def test_unnamed_runs_go_by_the_workflow_id(self):
+        self.record("anon", 80_000, name=None, workflow_id="wf-9")
+        self.assertEqual(estimates.estimate(item("q", name=None, workflow_id="wf-9")),
+                         {"estimate_ms": 80_000, "basis": "settings", "runs": 1})
+
+    def test_memoised_per_workflow_and_settings(self):
+        self.record("a", 100_000)
+        calls = []
+        real = persistence.recent_durations
+        self.addCleanup(setattr, persistence, "recent_durations", real)
+        persistence.recent_durations = lambda *args: calls.append(args) or real(*args)
+        cache = {}
+        for prompt_id in ("q1", "q2", "q3"):
+            estimates.estimate(item(prompt_id), cache)
+        estimates.estimate(item("q4", prompt=graph(steps=30)), cache)
+        self.assertEqual(len(calls), 3, "one query for the shared settings; two (settings, then workflow) for the new ones")
+
+
+class SnapshotTest(DbTest):
+    def setUp(self):
+        super().setUp()
+        reset_capture(self)
+        for i in range(3):
+            persistence.record_history(entry(f"h{i}", ms=600_000))            # Wf: 10 min
+        persistence.record_history(entry("v", name="Video", ms=1_800_000))   # Video: 30 min
+
+    def test_remaining_time_and_runs_without_an_estimate(self):
+        estimates.on_event("execution_start", {"prompt_id": "run", "timestamp": START})
+        estimates.on_event("progress", {"value": 3, "max": 8, "prompt_id": "run", "node": "3"})
+        queue = FakeQueue([item("run")], [item("p1", name="Video", number=2), item("p2", name="New", number=3),
+                                          item("p3", number=4)])
+        snap = estimates.snapshot(queue, now_ms=START + 240_000)
+        self.assertEqual(snap["now"], START + 240_000)
+        self.assertEqual(snap["running"], {"prompt_id": "run", "estimate_ms": 600_000, "basis": "settings", "runs": 3,
+                                           "started_at": START, "node": "3", "value": 3, "max": 8})
+        self.assertEqual(snap["pending"], {"p1": {"estimate_ms": 1_800_000, "basis": "settings", "runs": 1},
+                                           "p2": None,
+                                           "p3": {"estimate_ms": 600_000, "basis": "settings", "runs": 3}})
+        self.assertEqual(snap["remaining_ms"], 360_000 + 1_800_000 + 600_000)
+        self.assertEqual(snap["unknown"], 1)
+        json.dumps(snap)   # the route sends it as JSON
+
+    def test_past_its_estimate_the_running_run_adds_nothing_and_without_one_it_is_unknown(self):
+        estimates.on_event("execution_start", {"prompt_id": "run", "timestamp": START})
+        over = estimates.snapshot(FakeQueue([item("run")]), now_ms=START + 700_000)
+        self.assertEqual((over["remaining_ms"], over["unknown"]), (0, 0))
+        new = estimates.snapshot(FakeQueue([item("run", name="New")], [item("p", number=2)]), now_ms=START)
+        self.assertEqual((new["running"]["estimate_ms"], new["running"]["basis"], new["running"]["runs"]), (None, None, 0))
+        self.assertEqual((new["remaining_ms"], new["unknown"]), (600_000, 1))
+
+    def test_progress_of_another_run_is_not_shown_and_an_empty_queue_has_nothing(self):
+        estimates.on_event("execution_start", {"prompt_id": "older", "timestamp": START})
+        snap = estimates.snapshot(FakeQueue([item("run")]), now_ms=START + 60_000)
+        self.assertEqual((snap["running"]["started_at"], snap["running"]["node"]), (None, None))
+        self.assertEqual(snap["remaining_ms"], 600_000, "start unknown: the whole estimate")
+        self.assertEqual(estimates.snapshot(FakeQueue(), now_ms=START),
+                         {"now": START, "running": None, "pending": {}, "remaining_ms": 0, "unknown": 0})
+
+
+class EstimatesRouteTest(DbTest, unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        reset_capture(self)
+        persistence.record_history(entry("h", ms=600_000))
+        routes = web.RouteTableDef()
+        estimates.register_routes(types.SimpleNamespace(routes=routes, prompt_queue=FakeQueue([], [item("p")])))
+        app = web.Application()
+        app.add_routes(routes)
+        self.client = TestClient(TestServer(app))
+        await self.client.start_server()
+        self.addAsyncCleanup(self.client.close)
+
+    async def test_estimates_route(self):
+        res = await self.client.get("/queue_workbench/estimates")
+        self.assertEqual(res.status, 200)
+        data = await res.json()
+        self.assertEqual(data["pending"], {"p": {"estimate_ms": 600_000, "basis": "settings", "runs": 1}})
+        self.assertEqual((data["running"], data["remaining_ms"], data["unknown"]), (None, 600_000, 0))
+        self.assertIsInstance(data["now"], int)

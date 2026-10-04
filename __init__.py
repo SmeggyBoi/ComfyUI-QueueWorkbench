@@ -2,7 +2,8 @@
 ComfyUI Queue Workbench — Python backend
 - Captures live preview frames server-side so any connected client can poll them.
 - Optional ntfy push notification when a generation finishes (see config.example.json).
-- Queue persistence and run history (persistence.py), in-place edit / reorder routes (queue_edit.py).
+- Queue persistence and run history (persistence.py), in-place edit / reorder routes (queue_edit.py),
+  time estimates with the running run's progress for every device (estimates.py).
 """
 import base64
 import json
@@ -19,7 +20,7 @@ import folder_paths
 from aiohttp import web
 from server import PromptServer
 
-from . import oom_retry, summary
+from . import estimates, oom_retry, summary
 
 WEB_DIRECTORY = "./web"
 NODE_CLASS_MAPPINGS = {}
@@ -213,6 +214,10 @@ def _run_info(data):
 
 def _hooked_send_sync(event, data, sid=None):
     try:
+        estimates.on_event(event, data)   # sees every client's events; ComfyUI sends progress only to the queuing one
+    except Exception:
+        print(f"[QueueWorkbench] estimates hook error:\n{traceback.format_exc()}")
+    try:
         _capture_preview(event, data)
         if _config["ntfy_url"]:
             if event == "execution_start":
@@ -351,6 +356,14 @@ try:
     register_edit_routes(server)
 except Exception:
     print(f"[QueueWorkbench] queue edit setup error:\n{traceback.format_exc()}")
+
+# ---------------------------------------------------------------------------
+# Time estimates for queued runs + the running run's progress (see estimates.py)
+# ---------------------------------------------------------------------------
+try:
+    estimates.register_routes(server)
+except Exception:
+    print(f"[QueueWorkbench] estimates setup error:\n{traceback.format_exc()}")
 
 # ---------------------------------------------------------------------------
 # Retry a run once after CUDA out-of-memory (see oom_retry.py). Installed after
