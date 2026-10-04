@@ -5,8 +5,11 @@ import fs from "node:fs";
 const src = fs.readFileSync(new URL("../web/queue_workbench.js", import.meta.url), "utf8").replace(/^import .*$/mg, "");
 globalThis.window   = { matchMedia: () => ({ matches: true }) };
 globalThis.document = { getElementById: () => null };
-const { runResult, fmtDuration, finishedInfo, outputMedia, requeueBody, mergeNewRuns, historyRowHtml, detailHtml, groupInfo } = new Function("app", "api",
-    src + "\nreturn { runResult, fmtDuration, finishedInfo, outputMedia, requeueBody, mergeNewRuns, historyRowHtml, detailHtml, groupInfo };")({ registerExtension() {} }, { addEventListener() {} });
+const api = { addEventListener() {} };   // the History tests below set api.fetchApi
+const { runResult, fmtDuration, finishedInfo, outputMedia, requeueBody, mergeNewRuns, historyRowHtml, detailHtml, groupInfo, historyQuery, workflowOptionsHtml,
+        refreshHistory, setHistoryFilter, clearHistoryFilter, togglePin, historyState } = new Function("app", "api",
+    src + "\nreturn { runResult, fmtDuration, finishedInfo, outputMedia, requeueBody, mergeNewRuns, historyRowHtml, detailHtml, groupInfo, historyQuery, workflowOptionsHtml,"
+        + " refreshHistory, setHistoryFilter, clearHistoryFilter, togglePin, historyState: () => ({ historyRuns, historyNewestId }) };")({ registerExtension() {} }, api);
 
 const tests = [];
 const test = (name, fn) => tests.push([name, fn]);
@@ -149,9 +152,100 @@ test("a retry after out-of-memory is marked in its row and detail card", () => {
     assert.ok(!historyRowHtml(plain, groupInfo([plain.item]).get("c")).includes("↻"));
 });
 
+test("history query: the page or poll part, then only the filters that are set", () => {
+    const none = { status: "", workflow: null, q: "" };
+    assert.equal(historyQuery(none, { limit: 50 }), "limit=50");
+    assert.equal(historyQuery({ status: "error", workflow: "Long Videos", q: "  sunlit shop " }, { limit: 50, before: 12 }),
+        "limit=50&before=12&status=error&workflow=Long+Videos&q=sunlit+shop");
+    assert.equal(historyQuery({ status: "", workflow: "", q: "   " }, { after: 7 }), "after=7&workflow=", "unnamed; only spaces is no search");
+    assert.equal(historyQuery({ ...none, q: "100% a_b" }, {}), "q=100%25+a_b");
+});
+
+test("workflow filter: all, each workflow with its run count, unnamed; the chosen one stays listed", () => {
+    const workflows = [{ name: "Long <b>Videos</b>", count: 12 }, { name: null, count: 3 }];
+    assert.equal(workflowOptionsHtml(workflows, null), `<option value="" selected>All workflows</option>`
+        + `<option value="=Long &#60;b&#62;Videos&#60;/b&#62;">Long &#60;b&#62;Videos&#60;/b&#62; (12)</option><option value="=">Unnamed (3)</option>`);
+    assert.match(workflowOptionsHtml(workflows, ""), /<option value="=" selected>Unnamed \(3\)<\/option>/);
+    assert.match(workflowOptionsHtml(workflows, "Gone"), /<option value="=Gone" selected>Gone \(0\)<\/option>$/);
+    assert.equal(workflowOptionsHtml([], null), `<option value="" selected>All workflows</option>`, "workflows route failed: just All");
+});
+
+test("history row: ☆ before ⤴, a gold ★ once pinned; the detail card says Pinned", () => {
+    const run  = { id: 1, item: histItem("a", "Wf"), outputs: OUT, status: status("success"), pinned: false };
+    const info = groupInfo([run.item]).get("a");
+    const html = historyRowHtml(run, info);
+    assert.ok(html.includes("qm-pin-btn"));
+    assert.ok(html.indexOf("☆") < html.indexOf("⤴"));
+    assert.ok(!html.includes("★") && !html.includes("#f5c518"));
+    const pinned = historyRowHtml({ ...run, pinned: true }, info);
+    assert.ok(pinned.includes("★") && !pinned.includes("☆") && pinned.includes("#f5c518"));
+    assert.ok(detailHtml(run.item, info, "✓ Finished", { ...run, pinned: true }).includes("Pinned"));
+    assert.ok(!detailHtml(run.item, info, "✓ Finished", run).includes("Pinned"));
+});
+
+test("new runs past the cap: like the backend, only pinned runs stay beyond it", () => {
+    const r = (id, pinned = false) => ({ id, item: [0, `p${id}`, {}, {}, []], pinned });
+    assert.deepEqual(mergeNewRuns([r(3), r(2, true), r(1)], [r(5), r(4)], 3).map(x => x.id), [5, 4, 3, 2]);
+});
+
+// The History tab against a fake backend. These share the panel's state and run in order.
+const answer = body => ({ ok: true, status: 200, json: async () => body });
+const listed = (id, pid) => ({ id, prompt: histItem(pid, "Wf"), outputs: OUT, status: status("success"), pinned: false });
+const settle = () => new Promise(resolve => setTimeout(resolve, 0));
+
+test("a filter change while a request is out: its answer is dropped and the new filter's first page loads", async () => {
+    const requests = [];
+    api.fetchApi = url => new Promise(resolve => requests.push({ url, resolve }));
+    const done = refreshHistory();
+    setHistoryFilter({ status: "error" });
+    requests[0].resolve(answer({ runs: [listed(9, "old")], more: false }));
+    await settle();
+    assert.equal(requests[1].url, "/queue_workbench/history?limit=50&status=error");
+    requests[1].resolve(answer({ runs: [listed(4, "failed")], more: false }));
+    await done;
+    assert.deepEqual(historyState().historyRuns.map(r => r.item[1]), ["failed"]);
+    assert.equal(historyState().historyNewestId, 4, "the dropped answer moved no cursor");
+});
+
+test("Clear filters on an empty history: the plain empty state, not the filtered one", async () => {
+    const list = { innerHTML: "", querySelector: () => null };
+    const els  = { "qm-history": list, "qm-history-more": { style: {} }, "qm-filter-status": {}, "qm-filter-q": { value: "zebra" }, "qm-filter-workflow": {} };
+    document.getElementById = id => els[id] ?? null;
+    api.fetchApi = async () => answer({ runs: [], more: false });
+    try {
+        setHistoryFilter({ status: "", q: "zebra" });
+        await settle();
+        assert.match(list.innerHTML, /No runs match these filters/);
+        clearHistoryFilter();
+        await settle();
+        assert.match(list.innerHTML, /No finished runs yet/);
+        assert.equal(els["qm-filter-q"].value, "");
+    } finally {
+        document.getElementById = () => null;
+    }
+});
+
+test("⭐ takes the server's answer; a run gone from the history leaves the list; another failure leaves the star", async () => {
+    api.fetchApi = async () => answer({ runs: [listed(2, "b"), listed(1, "a")], more: false });
+    setHistoryFilter({});
+    await settle();
+    const [b, a] = historyState().historyRuns;
+    const sent = [];
+    api.fetchApi = async (url, init) => { sent.push([url, JSON.parse(init.body)]); return answer({ pinned: true }); };
+    await togglePin(a);
+    assert.deepEqual(sent, [["/queue_workbench/history/pin", { prompt_id: "a", pinned: true }]]);
+    assert.equal(a.pinned, true);
+    api.fetchApi = async () => ({ ok: false, status: 500, json: async () => ({}) });
+    await togglePin(a);
+    assert.equal(a.pinned, true);
+    api.fetchApi = async () => ({ ok: false, status: 404, json: async () => ({ error: "not in history" }) });
+    await togglePin(b);
+    assert.deepEqual(historyState().historyRuns.map(r => r.item[1]), ["a"]);
+});
+
 let failed = 0;
 for (const [name, fn] of tests) {
-    try { fn(); console.log(`ok   ${name}`); } catch (e) { failed++; console.log(`FAIL ${name}\n     ${e.message}`); }
+    try { await fn(); console.log(`ok   ${name}`); } catch (e) { failed++; console.log(`FAIL ${name}\n     ${e.message}`); }
 }
 console.log(`${tests.length - failed}/${tests.length} passed`);
 process.exit(failed ? 1 : 0);

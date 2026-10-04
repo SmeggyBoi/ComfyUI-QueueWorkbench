@@ -11,6 +11,7 @@
 - With ntfy configured, a *Queue finished* summary (runs, ✓ / ✕, total time, failed runs, last output) arrives after two or more runs.
 - Time estimates: pending runs show when they start, the status bar when the queue will be empty, the running run a progress bar with the time left (on every device, also one that didn't queue it), and the 🗂️ button the time left as a badge. An estimate is the median of the workflow's last five successful runs with the same time settings (steps, frames, duration, size, FPS, batch size), else of any of its runs.
 - Variations: *🎲 New seed* or *🎲 ×N* in a finished run's detail card, and *⧉ ×N* in a pending or running run's card, queue it again at the end of the queue with every seed re-rolled (seeds that matched still match).
+- History filters: status, workflow and a search over prompts and workflow names, over every stored run. Pin a run with ☆ to keep it: pinned runs are never trimmed and don't count toward the 200.
 
 ## 1.0.0
 

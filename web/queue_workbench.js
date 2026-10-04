@@ -8,7 +8,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-const BUILD = "2026-10-03i";
+const BUILD = "2026-10-03j";
 
 // Stale-JS detection (PWA caches extension JS hard): compare this bundle's BUILD
 // against the stamp the backend reads from web/queue_workbench.js ON DISK.
@@ -195,6 +195,7 @@ async function setPaused(val) {
 // ---------------------------------------------------------------------------
 const TAB        = "background:none;border:none;border-bottom:2px solid transparent;color:#888;padding:4px 10px 6px;cursor:pointer;font-size:12px;";
 const TAB_ACTIVE = "color:#ddd;border-bottom-color:#7b5cfa;";
+const FILTER     = "background:#141414;border:1px solid #444;color:#ddd;border-radius:5px;padding:3px 6px;font-size:12px;";
 
 function createPanel() {
     const panel = document.createElement("div");
@@ -343,10 +344,25 @@ function createPanel() {
     historyView.id = "qm-history-view";
     historyView.style.cssText = `display:none;flex-direction:column;flex:1;min-height:0;overflow-y:auto;padding:4px 10px 10px;`;
     historyView.innerHTML = `
+        <div style="position:sticky;top:0;z-index:1;display:flex;flex-wrap:wrap;gap:4px;margin:-4px -10px 2px;padding:6px 10px;background:#1a1a1a;border-bottom:1px solid #333;">
+            <select id="qm-filter-status" title="Status" style="${FILTER}">
+                <option value="">All statuses</option><option value="success">Succeeded</option><option value="error">Failed</option><option value="interrupted">Interrupted</option>
+            </select>
+            <select id="qm-filter-workflow" title="Workflow" style="${FILTER}flex:1 1 120px;min-width:0;">${workflowOptionsHtml([], null)}</select>
+            <input id="qm-filter-q" type="search" placeholder="Search prompts" style="${FILTER}flex:1 1 140px;min-width:0;">
+        </div>
         <div id="qm-history"></div>
         <button id="qm-history-more" style="display:none;${BTN}width:100%;margin-top:6px;">Show more</button>`;
     historyView.querySelector("#qm-history-more").addEventListener("click", () =>
         loadMoreHistory().catch(e => console.warn("[QueueWorkbench] Failed to fetch history:", e)));
+    historyView.querySelector("#qm-filter-status").addEventListener("change", e => setHistoryFilter({ status: e.target.value }));
+    historyView.querySelector("#qm-filter-workflow").addEventListener("change", e =>
+        setHistoryFilter({ workflow: e.target.value === "" ? null : e.target.value.slice(1) }));
+    const search = historyView.querySelector("#qm-filter-q");
+    search.addEventListener("input", () => {
+        clearTimeout(historySearchTimer);
+        historySearchTimer = setTimeout(() => setHistoryFilter({ q: search.value }), SEARCH_DEBOUNCE_MS);
+    });
 
     panel.append(header, statusBar, tabs, queueView, historyView);
     document.body.appendChild(panel);
@@ -371,7 +387,10 @@ function setTab(tab) {
     activeTab = tab;
     hideDetailCard();
     updateTabs();
-    if (tab === "history") refreshHistory();
+    if (tab === "history") {
+        refreshHistory();
+        refreshHistoryWorkflows();
+    }
 }
 
 function updateTabs() {
@@ -750,9 +769,10 @@ function chipsRowHtml(chips) {
 // ---------------------------------------------------------------------------
 // Finished runs (History tab) — status, timing and outputs read from a ComfyUI
 // history entry, the row built from them, and the body to queue a run again.
-// A run is { id, item, outputs, status }; item has the queue-item shape.
+// A run is { id, item, outputs, status, pinned }; item has the queue-item shape.
 // ---------------------------------------------------------------------------
 const OUTPUT_BORDER = "#7b5cfa";
+const PINNED_COLOR  = "#f5c518";
 const STATUS_MARKS  = {
     success:     { mark: "✓", color: "#6f6", label: "Finished" },
     error:       { mark: "✕", color: "#f66", label: "Failed" },
@@ -898,10 +918,31 @@ function variationCountFrom(value, previous) {
     return value === "" || !Number.isFinite(n) ? previous : Math.min(MAX_VARIATIONS, Math.max(1, n));
 }
 
-// New runs (newest first) go on top; a prompt_id that finished again keeps only its newest run
-function mergeNewRuns(runs, incoming) {
+// New runs (newest first) go on top; a prompt_id that finished again keeps only its newest run.
+// Like the backend's trim, the newest `cap` unpinned runs stay, and every pinned one.
+function mergeNewRuns(runs, incoming, cap = HISTORY_CLIENT_CAP) {
     const ids = new Set(incoming.map(r => r.item[1]));
-    return [...incoming, ...runs.filter(r => !ids.has(r.item[1]))];
+    let unpinned = 0;
+    return [...incoming, ...runs.filter(r => !ids.has(r.item[1]))].filter(r => r.pinned || ++unpinned <= cap);
+}
+
+// The History list's query string: the page or poll part, then the filters that are set
+function historyQuery(filter, extra) {
+    const params = new URLSearchParams(extra);
+    if (filter.status) params.set("status", filter.status);
+    if (filter.workflow !== null) params.set("workflow", filter.workflow);
+    if (filter.q.trim()) params.set("q", filter.q.trim());
+    return params.toString();
+}
+
+// The workflow filter's options. Values: "" = all, "=" + name ("=" alone = the unnamed runs). The
+// chosen workflow stays listed after its runs are gone, so the select never shows "All" wrongly.
+function workflowOptionsHtml(workflows, selected) {
+    const list   = selected === null || workflows.some(w => (w.name ?? "") === selected)
+        ? workflows : [...workflows, { name: selected || null, count: 0 }];
+    const chosen = selected === null ? "" : "=" + selected;
+    const option = (value, label) => `<option value="${esc(value)}"${value === chosen ? " selected" : ""}>${esc(label)}</option>`;
+    return option("", "All workflows") + list.map(w => option("=" + (w.name ?? ""), `${w.name ?? "Unnamed"} (${w.count})`)).join("");
 }
 
 function historyRowHtml(run, info) {
@@ -916,6 +957,7 @@ function historyRowHtml(run, info) {
             </span>
         </span>
         <span style="display:flex;gap:4px;flex-shrink:0;">
+            <button class="qm-pin-btn" title="${run.pinned ? "Unpin" : "Pin: never trimmed from the history"}" style="background:#333;border:none;color:${run.pinned ? PINNED_COLOR : "#aaa"};border-radius:4px;padding:2px 8px;cursor:pointer;font-size:11px;">${run.pinned ? "★" : "☆"}</button>
             <button class="qm-requeue-btn" title="Queue this run again (same seed)" style="background:#2a7a2a;border:none;color:#fff;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:11px;">⤴</button>
             <button class="qm-history-delete" title="Remove from history" style="background:#5a1a1a;border:none;color:#f88;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:11px;">✕</button>
         </span>
@@ -958,6 +1000,7 @@ function detailHtml(item, info, where, run = null) {
             <span style="font-size:14px;font-weight:600;color:#e6e6e6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(workflowName(item) || "Unnamed workflow")}</span>
             <span style="display:flex;align-items:center;gap:8px;flex-shrink:0;">
                 <span style="font-size:12px;color:#9a9a9a;">${esc(where)}</span>
+                ${run?.pinned ? `<span style="font-size:12px;color:${PINNED_COLOR};">★ Pinned</span>` : ""}
                 ${where.startsWith("#") && !where.startsWith("#1 ") ? `<button class="qm-detail-top" style="${BTN}padding:2px 10px;">⤒ Move to top</button>` : ""}
                 ${canEdit && where.startsWith("#") ? `<button class="qm-detail-edit" style="${BTN}padding:2px 10px;">✎ Edit</button>` : ""}
             </span>
@@ -1855,7 +1898,7 @@ function renderQueueRows() {
 // first. Listed runs carry a cut-down workflow; loading or re-queueing a run
 // fetches its full entry.
 // ---------------------------------------------------------------------------
-let historyRuns     = [];    // { id, item, outputs, status }, newest first
+let historyRuns     = [];    // { id, item, outputs, status, pinned }, newest first
 let historyMore     = false; // older runs exist beyond the loaded ones
 let historyLoaded   = false;
 let historyError    = false; // last fetch (first load or refresh) failed, e.g. 404 before a restart
@@ -1865,12 +1908,19 @@ let historyBusy     = false;
 let historyMoreBusy = false;
 let varyBusy        = false; // true while a ×N series is posting, so overlapping clicks don't stack
 let lastHistoryKey  = null;
-const HISTORY_CLIENT_CAP = 200; // matches the backend's HISTORY_LIMIT; keeps the client list from growing forever
+let historyFilter   = { status: "", workflow: null, q: "" };   // workflow: null = all, "" = the unnamed runs
+let historyWorkflows   = [];    // [{ name, count }] for the workflow filter
+let historySearchTimer = null;
+const HISTORY_CLIENT_CAP = 200; // matches the backend's HISTORY_LIMIT (unpinned runs); keeps the client list from growing forever
+const SEARCH_DEBOUNCE_MS = 300;
 
-async function fetchHistory(query) {
-    const res  = await api.fetchApi(`/queue_workbench/history?${query}`);
+// null when the filter changed while the request was out: that answer is for the old filter
+async function fetchHistory(extra) {
+    const filter = historyFilter;
+    const res  = await api.fetchApi(`/queue_workbench/history?${historyQuery(filter, extra)}`);
     const data = await res.json();
-    const runs = data.runs.map(r => ({ id: r.id, item: r.prompt, outputs: r.outputs || {}, status: r.status }));
+    if (filter !== historyFilter) return null;
+    const runs = data.runs.map(r => ({ id: r.id, item: r.prompt, outputs: r.outputs || {}, status: r.status, pinned: r.pinned }));
     for (const r of runs) {
         historyNewestId = Math.max(historyNewestId, r.id);
         historyOldestId = historyOldestId === null ? r.id : Math.min(historyOldestId, r.id);
@@ -1882,17 +1932,21 @@ async function fetchHistory(query) {
 async function refreshHistory() {
     if (historyBusy) return;
     historyBusy = true;
+    const filter = historyFilter;
     try {
         if (!historyLoaded) {
-            const { runs, more } = await fetchHistory("limit=50");
-            historyRuns   = runs;
-            historyMore   = more;
-            historyLoaded = true;
+            const page = await fetchHistory({ limit: 50 });
+            if (page) {
+                historyRuns   = page.runs;
+                historyMore   = page.more;
+                historyLoaded = true;
+            }
         } else {
-            const { runs } = await fetchHistory(`after=${historyNewestId}`);
-            // cap at the client too: the backend only keeps HISTORY_LIMIT, so older rows
-            // beyond it no longer exist server-side and would just sit there dead weight
-            if (runs.length) historyRuns = mergeNewRuns(historyRuns, runs).slice(0, HISTORY_CLIENT_CAP);
+            const page = await fetchHistory({ after: historyNewestId });
+            if (page?.runs.length) {
+                historyRuns = mergeNewRuns(historyRuns, page.runs);
+                refreshHistoryWorkflows();
+            }
         }
         historyError = false;
     } catch (e) {
@@ -1901,6 +1955,7 @@ async function refreshHistory() {
     } finally {
         historyBusy = false;
     }
+    if (filter !== historyFilter) return refreshHistory();   // changed meanwhile: load the new filter's first page
     renderHistory();   // also on failure, so the empty state shows
 }
 
@@ -1908,13 +1963,49 @@ async function loadMoreHistory() {
     if (historyMoreBusy) return;
     historyMoreBusy = true;
     try {
-        const { runs, more } = await fetchHistory(`limit=50&before=${historyOldestId}`);
-        historyRuns = [...historyRuns, ...runs];
-        historyMore = more;
-        renderHistory();
+        const page = await fetchHistory({ limit: 50, before: historyOldestId });
+        if (page) {
+            historyRuns = [...historyRuns, ...page.runs];
+            historyMore = page.more;
+            renderHistory();
+        }
     } finally {
         historyMoreBusy = false;
     }
+}
+
+// A filter change starts the list over: first page and poll cursors of the new filter
+function setHistoryFilter(change) {
+    historyFilter   = { ...historyFilter, ...change };
+    historyRuns     = [];
+    historyMore     = false;
+    historyLoaded   = false;
+    historyNewestId = 0;
+    historyOldestId = null;
+    refreshHistory();
+}
+
+function clearHistoryFilter() {
+    clearTimeout(historySearchTimer);
+    document.getElementById("qm-filter-status").value = "";
+    document.getElementById("qm-filter-q").value = "";
+    setHistoryFilter({ status: "", workflow: null, q: "" });
+    renderWorkflowFilter();
+}
+
+async function refreshHistoryWorkflows() {
+    try {
+        const res = await api.fetchApi("/queue_workbench/history/workflows");
+        historyWorkflows = res.ok ? (await res.json()).workflows : [];
+    } catch (e) {
+        historyWorkflows = [];   // the filter offers just "All workflows"
+    }
+    renderWorkflowFilter();
+}
+
+function renderWorkflowFilter() {
+    const select = document.getElementById("qm-filter-workflow");
+    if (select) select.innerHTML = workflowOptionsHtml(historyWorkflows, historyFilter.workflow);
 }
 
 async function fullHistoryItem(run) {
@@ -1997,20 +2088,42 @@ async function deleteHistoryRun(run) {
     renderHistory();
 }
 
+// ⭐ on a history row: a pinned run is never trimmed. A run removed meanwhile leaves the list.
+async function togglePin(run) {
+    const res = await api.fetchApi("/queue_workbench/history/pin", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt_id: run.item[1], pinned: !run.pinned }),
+    });
+    if (res.status === 404) {
+        toast("error", "This run is no longer in the history");
+        if (cardItemId === run.item[1]) hideDetailCard();
+        historyRuns = historyRuns.filter(r => r !== run);
+    } else if (res.ok) {
+        run.pinned = (await res.json()).pinned;
+    } else {
+        toast("error", run.pinned ? "Couldn't unpin the run" : "Couldn't pin the run");
+    }
+    renderHistory();
+}
+
 function renderHistory() {
     const list = document.getElementById("qm-history");
     const more = document.getElementById("qm-history-more");
     if (!list || !more) return;
-    const key = JSON.stringify([historyRuns.map(r => r.id), historyMore, expandedId, Object.keys(workflowNames).length, historyLoaded, historyError]);
+    const key = JSON.stringify([historyRuns.map(r => [r.id, r.pinned]), historyMore, expandedId, Object.keys(workflowNames).length,
+        historyLoaded, historyError, historyFilter]);
     if (key === lastHistoryKey) return;
     lastHistoryKey = key;
     more.style.display = historyMore ? "block" : "none";
     list.innerHTML = "";
     if (historyRuns.length === 0) {
+        const filtered = historyFilter.status || historyFilter.workflow !== null || historyFilter.q.trim();
         const text = !historyLoaded
             ? (historyError ? "Couldn't load the history. Restart ComfyUI if you just updated." : "Loading…")
-            : "No finished runs yet";
+            : filtered
+                ? `No runs match these filters · <span class="qm-clear-filters" style="color:#7b9cfa;cursor:pointer;text-decoration:underline;">Clear filters</span>`
+                : "No finished runs yet";
         list.innerHTML = `<div style="color:#555;padding:4px 4px;font-size:12px;">${text}</div>`;
+        list.querySelector(".qm-clear-filters")?.addEventListener("click", clearHistoryFilter);
         return;
     }
     const info = groupInfo(historyRuns.map(r => r.item));
@@ -2036,6 +2149,10 @@ function renderHistory() {
         el.querySelector(".qm-load-workflow").addEventListener("click", (e) => {
             e.stopPropagation();
             fullHistoryItem(run).then(loadWorkflowFromItem).catch(err => toast("error", "Couldn't load the run", err.message));
+        });
+        el.querySelector(".qm-pin-btn").addEventListener("click", (e) => {
+            e.stopPropagation();
+            togglePin(run).catch(err => toast("error", "Couldn't pin the run", err.message));
         });
         el.querySelector(".qm-requeue-btn").addEventListener("click", (e) => {
             e.stopPropagation();
@@ -2314,6 +2431,7 @@ function togglePanel() {
     if (panelOpen) {
         startPolling();
         refreshSaved();   // refresh the previous-session backlog when opened
+        if (activeTab === "history") refreshHistoryWorkflows();
         Promise.all([refreshWorkflowNames(), probeEditSupport()]).then(() => { renderQueue(); renderSaved(); renderHistory(); });
     } else {
         stopPolling();

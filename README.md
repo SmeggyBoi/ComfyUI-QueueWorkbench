@@ -29,7 +29,8 @@ runs of the same workflow apart, and fix a queued run without re-queueing it.
   with the same rows as the queue plus the first output, a ✓ / ✕ / ⏹ status mark,
   finish time and duration. The detail card shows every output and, for a failed
   run, the error. Queue a run again with ⤴ (same settings, same seed) or remove it
-  with ✕. The history survives restarts.
+  with ✕. Filter by status, workflow or text in the prompts; pin a run with ☆ to
+  keep it beyond the 200. The history survives restarts.
 - **Survives restarts.** Pending and paused runs are mirrored to a local SQLite
   file. After a restart or crash they show up as *Saved from previous session*,
   where you can restore or discard them. Nothing re-runs on its own.
@@ -84,6 +85,8 @@ red banner at the top tells you so.
 | Run a finished run with new seeds | *🎲 New seed* in its detail card, or *🎲 ×* next to a number (1–20) for that many variations. They go to the end of the queue. |
 | Duplicate a queued run with new seeds | *⧉ ×* next to a number in a pending or running run's detail card |
 | Remove a run from the history | ✕ on its history row (output files stay) |
+| Find a finished run | Filters at the top of the *History* tab: status, workflow, and a search over prompts and workflow names. They cover every stored run, not just the loaded ones. |
+| Keep a run for good | ☆ on its history row (★ = pinned). Pinned runs are never trimmed and don't count toward the 200. |
 
 ### How editing works
 
@@ -165,7 +168,7 @@ including this panel and its live preview.
   the panel works independently.
 - If ComfyUI wasn't restarted after installing or updating, ✎ stays hidden,
   reordering falls back to deleting and re-queueing, and the History tab can't
-  load.
+  load (after an update: its filters and ☆ do nothing).
 
 ## Known limitations
 
@@ -187,7 +190,7 @@ including this panel and its live preview.
 
 Everything stays on your machine. The only network request this extension makes
 is the ntfy notification, and only if you configure it. The persistence file
-`queue_persist.db` (in this folder) contains your queued prompts and workflows, and those of your last 200 finished runs. Since it keeps the full workflow of each of those 200 runs, it can grow to tens of MB with large workflows.
+`queue_persist.db` (in this folder) contains your queued prompts and workflows, and those of your last 200 finished runs plus the ones you pinned. Since it keeps the full workflow of each of those runs, it can grow to tens of MB with large workflows.
 
 ## Development
 
