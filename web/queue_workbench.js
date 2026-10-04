@@ -8,7 +8,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-const BUILD = "2026-10-03f";
+const BUILD = "2026-10-03g";
 
 // Stale-JS detection (PWA caches extension JS hard): compare this bundle's BUILD
 // against the stamp the backend reads from web/queue_workbench.js ON DISK.
@@ -37,6 +37,8 @@ let livePreviewUrl = null;   // current object URL for the latest preview frame
 let isGenerating   = false;  // true while a job is actively running
 let savedJobs      = [];     // backlog persisted from a previous session
 let activeTab      = "queue"; // panel tab: "queue" | "history"
+let estimates      = null;    // last /queue_workbench/estimates answer; null = none (backend not restarted, or failed)
+let toolbarBtn     = null;    // the 🗂️ button, also while it is out of the DOM before a re-insertion
 
 // ---------------------------------------------------------------------------
 // API helpers
@@ -875,6 +877,7 @@ function detailHtml(item, info, where, run = null) {
             </span>
         </div>
         <div style="margin-top:2px;font-size:11px;color:#777;">Queued ${esc(queuedAt(item))}<span style="margin-left:10px;font-family:monospace;">${esc(item[1])}</span>${item[3]?.qm_retry_of ? `<span style="margin-left:10px;color:#e3ad54;">↻ Retry of ${esc(shortId(item[3].qm_retry_of))}</span>` : ""}</div>
+        ${!run && (where === "Running" || where.startsWith("#")) ? `<div class="qm-est-line" data-prompt-id="${esc(item[1])}" style="display:none;margin-top:2px;font-size:11px;color:#e3ad54;"></div>` : ""}
         ${error ? `<div style="margin-top:8px;max-height:120px;overflow-y:auto;color:#f88;font-size:12px;white-space:pre-wrap;word-break:break-word;user-select:text;">${esc([error.node, error.message].filter(Boolean).join(": "))}</div>` : ""}
         ${gallery("Outputs", outputs, OUTPUT_BORDER)}
         ${gallery(outputs.length ? "Inputs" : "", info.thumbs, "#3a3a3a")}
@@ -923,6 +926,7 @@ function showDetailCard(row, item, info, where, run = null) {
     const wasHidden = card.style.display === "none";
     card.innerHTML  = detailHtml(item, info, where, run);
     wireDetailButtons(card, item);
+    applyEstimates();
     cardItemId      = item[1];
     // Left of the panel; rows in the lower half anchor the card's bottom so it grows upward
     const panelRect = document.getElementById("qm-panel").getBoundingClientRect();
@@ -1371,9 +1375,182 @@ function renderEditBar() {
     bar.style.display  = "flex";
 }
 
+// ---------------------------------------------------------------------------
+// Time estimates — from the backend (estimates.py): each queued run's expected
+// duration (median of its workflow's newest successful runs) and the running run's
+// progress, captured server-side so every device sees it. An answer is
+//   { now, running: { prompt_id, started_at, estimate_ms, basis, runs, node, value, max } | null,
+//     pending: { <prompt_id>: { estimate_ms, basis, runs } | null }, remaining_ms, unknown }
+// with every time on the server's clock (a phone with a wrong clock still adds up right).
+// Rows, status bar, detail cards and the toolbar badge carry empty placeholders that
+// applyEstimates() fills in place: estimates change on every poll, and rebuilding the
+// rows for them would close hover cards and restart video thumbnails.
+// ---------------------------------------------------------------------------
+const ESTIMATES_CLOSED_MS = 15_000;   // badge refresh while the panel is closed (open, refreshQueue fetches every 2 s)
+
+// "<1m", "8m", "1h 12m"
+function fmtMinutes(ms) {
+    const m = Math.round(ms / 60_000);
+    if (m < 1)  return "<1m";
+    if (m < 60) return `${m}m`;
+    return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m`;
+}
+
+// "~12 min left", "~1h 12m left", "<1 min left"
+function leftText(ms) {
+    const m = Math.round(ms / 60_000);
+    if (m < 1)  return "<1 min left";
+    if (m < 60) return `~${m} min left`;
+    return `~${fmtMinutes(ms)} left`;
+}
+
+// ms the running run still needs by its estimate (0 once past it), null without an estimate.
+// A start the capture missed counts the whole estimate.
+function runningRemaining(est) {
+    const r = est?.running;
+    if (r?.estimate_ms == null) return null;
+    return Math.max(0, r.estimate_ms - (r.started_at != null ? est.now - r.started_at : 0));
+}
+
+// prompt_id -> { at, exact } | null for the pending runs in queue order: the server's now +
+// the running run's remaining time + the estimates of the runs before it. After a run without
+// an estimate (the running one included) the time is only a lower bound (exact false, shown
+// "starts ≥ ~21:10"); a lower bound that is just "now" says nothing and is null. Runs the
+// estimates don't list yet (queued since the last fetch) count as runs without an estimate.
+function startTimes(est, pendingIds) {
+    const starts = {};
+    if (!est) return starts;
+    let at    = est.now;
+    let exact = true;
+    if (est.running) {
+        const left = runningRemaining(est);
+        if (left == null) exact = false;
+        else at += left;
+    }
+    for (const id of pendingIds) {
+        starts[id] = exact || at > est.now ? { at, exact } : null;
+        const ms = est.pending?.[id]?.estimate_ms;
+        if (ms == null) exact = false;
+        else at += ms;
+    }
+    return starts;
+}
+
+// The running row's bar + label: elapsed / estimate, capped at 99 %, with the time left; past
+// the estimate an indeterminate bar (fraction null) and "running longer than usual"; without an
+// estimate or start time the current node's value / max under its title (_meta.title or
+// class_type); null when there is nothing to show or the estimates are of another run.
+function runningProgress(est, item) {
+    const r = est?.running;
+    if (!r || r.prompt_id !== item[1]) return null;
+    if (r.estimate_ms != null && r.started_at != null) {
+        const elapsed = est.now - r.started_at;
+        if (elapsed >= r.estimate_ms) return { fraction: null, label: "running longer than usual" };
+        return { fraction: Math.min(0.99, Math.max(0, elapsed / r.estimate_ms)), label: leftText(r.estimate_ms - elapsed) };
+    }
+    if (r.max > 0 && r.value != null) {
+        const node  = item[2]?.[r.node];
+        const title = node?._meta?.title || node?.class_type;
+        return { fraction: Math.min(1, r.value / r.max), label: `${title ? `${title} · ` : ""}${r.value}/${r.max}` };
+    }
+    return null;
+}
+
+const estimatedRuns = est => (est?.running ? 1 : 0) + Object.keys(est?.pending || {}).length;
+
+// Toolbar badge: time until the queue is empty, "+" when runs without an estimate come on top,
+// "?" when no run has one, "" when nothing is queued or running (or there are no estimates)
+function badgeText(est) {
+    const count = estimatedRuns(est);
+    if (!count) return "";
+    if (est.unknown >= count) return "?";
+    return fmtMinutes(est.remaining_ms) + (est.unknown ? "+" : "");
+}
+
+// Status bar and badge tooltip: "queue empty ~23:40", "… · 2 without estimate"; "" when idle
+function queueEndText(est) {
+    const count = estimatedRuns(est);
+    if (!count) return "";
+    const without = est.unknown ? `${est.unknown} without estimate` : "";
+    if (est.unknown >= count) return without;
+    return [`queue empty ~${fmtTime(est.now + est.remaining_ms)}`, without].filter(Boolean).join(" · ");
+}
+
+// Detail card of a pending / running run: "Estimated 32m 10s (from 5 runs with these settings)"
+function estimateLine(e) {
+    if (e?.estimate_ms == null) return "";
+    const runs = e.runs === 1 ? "1 run" : `${e.runs} runs`;
+    return `Estimated ${fmtDuration(e.estimate_ms)} (from ${runs} ${e.basis === "settings" ? "with these settings" : "of this workflow with other settings"})`;
+}
+
+async function refreshEstimates() {
+    try {
+        const res = await api.fetchApi("/queue_workbench/estimates");
+        estimates = res.ok ? await res.json() : null;
+    } catch (e) {
+        estimates = null;   // e.g. offline; a 404 (backend not restarted yet) lands above: nothing shown
+    }
+    applyEstimates();
+}
+
+// Writes the current estimates into every placeholder that is rendered
+function applyEstimates() {
+    const est = estimates;
+    const end = queueEndText(est);
+    if (toolbarBtn) {
+        toolbarBtn.title = end ? `Queue Workbench · ${end}` : "Queue Workbench";
+        const badge = toolbarBtn.querySelector(".qm-badge");
+        badge.textContent   = badgeText(est);
+        badge.style.display = badge.textContent ? "block" : "none";
+    }
+    const eta = document.getElementById("qm-eta");
+    if (eta) eta.textContent = end ? ` · ${end}` : "";
+    const starts = startTimes(est, pendingSorted().map(it => it[1]));
+    for (const el of document.querySelectorAll("#qm-pending .qm-start")) {
+        const s = starts[el.dataset.promptId];
+        el.textContent = s ? ` · starts ${s.exact ? "" : "≥ "}~${fmtTime(s.at)}` : "";
+    }
+    const running = (queueData.queue_running || [])[0];
+    const block   = document.querySelector("#qm-running .qm-run-progress");
+    if (block) showProgress(block, running ? runningProgress(est, running) : null);
+    for (const el of document.querySelectorAll(".qm-est-line")) {
+        const id = el.dataset.promptId;
+        el.textContent   = estimateLine(est?.running?.prompt_id === id ? est.running : est?.pending?.[id]);
+        el.style.display = el.textContent ? "block" : "none";
+    }
+}
+
+// The running row's progress block: a filling bar, a sweeping one (fraction null) or hidden
+function showProgress(block, p) {
+    block.style.display = p ? "block" : "none";
+    if (!p) return;
+    block.querySelector(".qm-run-label").textContent = p.label;
+    const bar  = block.querySelector(".qm-run-bar");
+    const mode = p.fraction == null ? "indeterminate" : "determinate";
+    if (bar.dataset.mode !== mode) {   // only on a change, so the sweep keeps going across polls
+        bar.dataset.mode = mode;
+        bar.getAnimations().forEach(a => a.cancel());
+        bar.style.opacity = "1";
+        if (mode === "indeterminate") {
+            const still = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+            bar.style.width = still ? "100%" : "35%";
+            if (still) bar.style.opacity = "0.4";
+            else bar.animate([{ transform: "translateX(-100%)" }, { transform: "translateX(300%)" }],
+                             { duration: 1400, iterations: Infinity, easing: "ease-in-out" });
+        }
+    }
+    if (mode === "determinate") bar.style.width = `${(p.fraction * 100).toFixed(1)}%`;
+}
+
 let lastRenderKey = null; // skip rebuilding the DOM on polls where nothing changed
 
+// The rows, then the estimates into their placeholders (also on polls that rebuild nothing)
 function renderQueue() {
+    renderQueueRows();
+    applyEstimates();
+}
+
+function renderQueueRows() {
     const statusEl  = document.getElementById("qm-status");
     const runningEl = document.getElementById("qm-running");
     const pendingEl = document.getElementById("qm-pending");
@@ -1395,7 +1572,7 @@ function renderQueue() {
 
     // Status bar
     const pausedTag = isPaused ? " · <span style='color:#f90'>PAUSED</span>" : "";
-    statusEl.innerHTML = `Running: ${running.length} · Pending: ${pending.length}${pausedTag}`;
+    statusEl.innerHTML = `Running: ${running.length} · Pending: ${pending.length}${pausedTag}<span id="qm-eta"></span>`;
 
     // Running item
     runningEl.innerHTML = "";
@@ -1438,6 +1615,10 @@ function renderQueue() {
                     </span>
                 </span>
                 <button onclick="event.stopPropagation();window._qmInterrupt()" style="background:#8b0000;border:none;color:#fff;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:11px;flex-shrink:0;">Interrupt</button>
+                <div class="qm-run-progress" style="display:none;width:100%;margin-top:5px;">
+                    <div style="height:3px;background:#2a3a2a;border-radius:2px;overflow:hidden;"><div class="qm-run-bar" style="height:100%;width:0;background:#6f6;border-radius:2px;transition:width 0.5s linear;"></div></div>
+                    <div class="qm-run-label" style="margin-top:3px;font-size:10px;color:#6a6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"></div>
+                </div>
                 ${chipsRowHtml(chips)}
             `;
 
@@ -1514,7 +1695,7 @@ function renderQueue() {
                 <span class="qm-drag-handle" style="color:#555;font-size:16px;cursor:grab;flex-shrink:0;touch-action:none;padding:8px 10px;margin:-8px -10px;">⠿</span>
                 <span style="display:flex;gap:3px;flex-shrink:0;">${thumbsHtml(thumbs, 44, "#444", "#333")}</span>
                 <span style="display:flex;flex-direction:column;gap:2px;overflow:hidden;min-width:0;">
-                    <span style="color:#aaa;font-size:12px;white-space:nowrap;">#${i + 1} <span style="color:#666;font-size:11px;">· ${queuedAt(item)} · <span class="qm-load-workflow" data-index="${i}" style="color:#7b9cfa;cursor:pointer;text-decoration:underline;text-decoration-style:dotted;" title="Load this workflow onto canvas">${shortId(id)}</span></span></span>
+                    <span style="color:#aaa;font-size:12px;white-space:nowrap;">#${i + 1} <span style="color:#666;font-size:11px;">· ${queuedAt(item)}<span class="qm-start" data-prompt-id="${esc(id)}" style="color:#9a9a9a;"></span> · <span class="qm-load-workflow" data-index="${i}" style="color:#7b9cfa;cursor:pointer;text-decoration:underline;text-decoration-style:dotted;" title="Load this workflow onto canvas">${shortId(id)}</span></span></span>
                     ${nameHtml(workflowName(item))}
                 </span>
             </span>
@@ -1930,7 +2111,9 @@ function endTouchDrag() {
 // ---------------------------------------------------------------------------
 async function refreshQueue() {
     try {
-        queueData = await fetchQueue();
+        // The estimates alongside, so rows and their start times are of the same moment
+        const [data] = await Promise.all([fetchQueue(), panelOpen ? refreshEstimates() : null]);
+        queueData = data;
         const hasRunning = (queueData.queue_running || []).length > 0;
         if (hasRunning && !isGenerating) {
             isGenerating     = true;
@@ -1986,7 +2169,16 @@ function createToolbarButton() {
     btn.id    = "qm-toolbar-btn";
     btn.title = "Queue Workbench";
     btn.textContent = "🗂️";
+    // Time until the queue is empty (applyEstimates). A child of the button, so every
+    // re-insertion below carries it along.
+    const badge = document.createElement("span");
+    badge.className = "qm-badge";
+    badge.style.cssText = "display:none;position:absolute;top:-5px;right:-6px;background:#e3ad54;color:#1a1a1a;" +
+        "font:700 9px/13px sans-serif;padding:0 4px;border-radius:7px;white-space:nowrap;pointer-events:none;";
+    btn.appendChild(badge);
+    toolbarBtn = btn;
     btn.style.cssText = `
+        position: relative;
         border: 1px solid #555;
         border-radius: 5px;
         color: #ddd;
@@ -2409,6 +2601,9 @@ app.registerExtension({
         connectPreviewSocket(); // always attach, regardless of panel state
         qmCheckBuild();
         setInterval(renderEditBar, 500);
+        // Badge while the panel is closed; while it is open refreshQueue fetches the estimates
+        refreshEstimates();
+        setInterval(() => { if (!panelOpen) refreshEstimates(); }, ESTIMATES_CLOSED_MS);
 
         // Hide panel initially
         const panel = document.getElementById("qm-panel");

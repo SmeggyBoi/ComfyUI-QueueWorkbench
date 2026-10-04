@@ -36,6 +36,13 @@ runs of the same workflow apart, and fix a queued run without re-queueing it.
 - **Unattended queues.** A run that fails because the GPU ran out of memory is
   queued again once, right away. With ntfy configured, a *Queue finished*
   summary arrives when two or more runs are done.
+- **Time estimates.** Pending runs show when they will start (*starts ~21:10*),
+  the status bar when the queue will be empty, and the running run a progress
+  bar with the time left — on every device, also your phone. With the panel
+  closed, the 🗂️ button shows the time left as a badge. An estimate is the median
+  of the workflow's last five successful runs with the same time settings (steps,
+  frames, duration, size, FPS, batch size), else of any of its runs; a workflow
+  that never finished has none yet.
 - **Live preview everywhere.** The running row shows the sampler preview, also
   on devices that didn't queue the run (e.g. your phone on the same server).
 - **Optional push notification** via [ntfy](https://ntfy.sh) when a generation

@@ -9,6 +9,7 @@
 - Reorder on phones: long-press ⠿ and drag (same red target, slide and flash), or ⤒ Move to top in a pending run's detail.
 - A run that fails because the GPU ran out of memory is queued again once, right away (`oom_retry`, on by default; not while paused). History marks the retry with ↻.
 - With ntfy configured, a *Queue finished* summary (runs, ✓ / ✕, total time, failed runs, last output) arrives after two or more runs.
+- Time estimates: pending runs show when they start, the status bar when the queue will be empty, the running run a progress bar with the time left (on every device, also one that didn't queue it), and the 🗂️ button the time left as a badge. An estimate is the median of the workflow's last five successful runs with the same time settings (steps, frames, duration, size, FPS, batch size), else of any of its runs.
 
 ## 1.0.0
 
