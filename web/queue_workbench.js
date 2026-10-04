@@ -813,14 +813,17 @@ function requeueBody(item, clientId) {
     return { prompt: item[2], extra_data: extra, client_id: clientId, partial_execution_targets: item[4] };
 }
 
-// Variations: a run queued again with every seed re-rolled. A seed is any number input named
-// like one, except 0 (nodes with per-clip seed slots often leave unused ones at 0).
-const isSeed = (input, value) => /seed/i.test(input) && typeof value === "number" && value !== 0;
+// Variations: a run queued again with every seed re-rolled. A seed is any integer input named
+// like one, except 0 (nodes with per-clip seed slots often leave unused ones at 0); a decimal
+// like variation_seed_strength is never a seed.
+const isSeed = (input, value) => /seed/i.test(input) && Number.isInteger(value) && value !== 0;
 
-// A seed in [1, 2^50), the range of ComfyUI's own "randomize", other than old
+// A seed in [1, 2^31 - 1], other than old. Narrower than ComfyUI's own "randomize" range because
+// several nodes (SeedVR2, Comfy API nodes, some TTS / utility packs) cap their seed input at a
+// 32-bit int and reject anything wider.
 function newSeed(old, random) {
     let seed = old;
-    while (seed === old) seed = 1 + Math.floor(random() * (2 ** 50 - 1));
+    while (seed === old) seed = 1 + Math.floor(random() * (2 ** 31 - 1));
     return seed;
 }
 
@@ -1343,7 +1346,7 @@ function validationMessage(data, items) {
         const title = prompt[nodeId]?._meta?.title || nodeError.class_type || nodeId;
         return `${title}: ${first.message}${first.details ? ` (${first.details})` : ""}`;
     }
-    return data.error?.message || "The server rejected the edited graph.";
+    return data.error?.message || "The server rejected the run.";
 }
 
 async function runAlreadyStarted(session) {
@@ -1860,6 +1863,7 @@ let historyNewestId = 0;     // poll cursors, kept apart from the list so deleti
 let historyOldestId = null;
 let historyBusy     = false;
 let historyMoreBusy = false;
+let varyBusy        = false; // true while a ×N series is posting, so overlapping clicks don't stack
 let lastHistoryKey  = null;
 const HISTORY_CLIENT_CAP = 200; // matches the backend's HISTORY_LIMIT; keeps the client list from growing forever
 
@@ -1935,28 +1939,49 @@ async function requeueRun(run) {
 }
 
 // count copies of a run at the end of the queue, each with its own new seeds. A History run is
-// fetched in full first (the list carries a cut-down workflow); queued runs carry theirs.
-// Stops at the first copy the server rejects.
+// fetched in full first (the list carries a cut-down workflow); queued runs carry theirs. Stops
+// at the first copy the server rejects, can't reach, or only partially queues (some outputs
+// failed validation but ComfyUI queued the rest anyway, so it still counts).
 async function queueVariations(item, run, count) {
-    const full   = run ? await fullHistoryItem(run) : item;
-    const name   = workflowName(full) || "this run";
-    const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
-    for (let k = 0; k < count; k++) {
-        const body = variationBody(full, api.clientId);
-        const res  = await api.fetchApi("/prompt", {
-            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
-        });
-        if (!res.ok) {
+    if (varyBusy) return;
+    varyBusy = true;
+    try {
+        const full   = run ? await fullHistoryItem(run) : item;
+        const name   = workflowName(full) || "this run";
+        const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+        const seeded = rerollSeeds(full).changed > 0;
+        for (let k = 0; k < count; k++) {
+            const body = variationBody(full, api.clientId);
+            let res;
+            try {
+                res = await api.fetchApi("/prompt", {
+                    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+                });
+            } catch (err) {
+                toast("error", `Couldn't queue variation ${k + 1} of ${count}`, `${err.message} — ${k} of ${count} queued`);
+                if (k > 0) await refreshQueue();
+                return;
+            }
             const data = await res.json().catch(() => ({}));
-            toast("error", `Couldn't queue variation ${k + 1} of ${count}`,
-                `${validationMessage(data, [{ prompt_id: data.prompt_id, prompt: body.prompt }])} — ${k} of ${count} queued`);
-            if (k > 0) await refreshQueue();
-            return;
+            if (!res.ok) {
+                toast("error", `Couldn't queue variation ${k + 1} of ${count}`,
+                    `${validationMessage(data, [{ prompt_id: data.prompt_id, prompt: body.prompt }])} — ${k} of ${count} queued`);
+                if (k > 0) await refreshQueue();
+                return;
+            }
+            if (Object.keys(data.node_errors || {}).length) {
+                toast("warn", `Variation ${k + 1} of ${count} skipped some outputs`,
+                    `${validationMessage(data, [{ prompt_id: data.prompt_id, prompt: body.prompt }])} — ${k + 1} of ${count} queued`);
+                await refreshQueue();
+                return;
+            }
         }
+        if (seeded) toast("success", `Queued ${plural(count, "variation")} of ${name}`);
+        else toast("warn", `No seeds found — queued ${plural(count, "identical run")} of ${name}`);
+        await refreshQueue();
+    } finally {
+        varyBusy = false;
     }
-    if (rerollSeeds(full).changed) toast("success", `Queued ${plural(count, "variation")} of ${name}`);
-    else toast("warn", `No seeds found — queued ${plural(count, "identical run")} of ${name}`);
-    await refreshQueue();
 }
 
 async function deleteHistoryRun(run) {

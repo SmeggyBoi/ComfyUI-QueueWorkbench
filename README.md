@@ -175,11 +175,13 @@ including this panel and its live preview.
   don't re-run on update.
 - A run queued with "queue selected output nodes" runs all outputs after it has
   been edited.
-- Queueing a finished run again doesn't carry your Comfy.org login, so runs with
-  paid API nodes fail when queued again from the history.
+- Queueing a finished run again or a variation doesn't carry your Comfy.org
+  login, so runs with paid API nodes fail when queued again from the history.
 - Variations (🎲 / ⧉) always run with their new seeds, but the workflow saved in
-  their outputs keeps the old seed where it can't find the seed's widget, e.g. a
-  seed set by a frontend *Primitive* node or inside a legacy group node.
+  their outputs keeps the old seed where it can't find the seed's widget, e.g.
+  inside a legacy group node.
+- A seed fed from a plain Int *Primitive* node isn't re-rolled: its input is
+  named `value`, not `seed`. Name the seed input or use a seed node instead.
 
 ## Privacy
 
