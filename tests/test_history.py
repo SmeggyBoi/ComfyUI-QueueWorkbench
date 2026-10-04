@@ -36,6 +36,25 @@ def ids(runs):
     return [r["prompt"][1] for r in runs]
 
 
+def run(prompt_id, name="Wf", state="success", text="a woman walks through a sunlit flower shop"):
+    """An entry of workflow `name` (None: unnamed) prompted with `text` that ended as `state`."""
+    e = entry(prompt_id, status="success" if state == "success" else "error")
+    e["prompt"][2] = {"6": {"class_type": "CLIPTextEncode", "inputs": {"text": text, "clip": ["4", 1]}},
+                      "3": {"class_type": "KSampler", "inputs": {"sampler_name": "euler ancestral", "seed": 1}}}
+    e["prompt"][3]["extra_pnginfo"]["workflow"]["extra"]["qm_name"] = f"{name}.json" if name else None
+    if state == "interrupted":
+        e["status"]["messages"] = [["execution_interrupted", {"prompt_id": prompt_id}]]
+    return e
+
+
+def insert_raw(path, e):
+    """Store an entry the way an older version did: only prompt_id, run_json and entry_json."""
+    with contextlib.closing(sqlite3.connect(path)) as conn:
+        conn.execute("INSERT INTO history (prompt_id, run_json, entry_json) VALUES (?,?,?)",
+                     (e["prompt"][1], json.dumps(persistence._list_row(e)), json.dumps(e)))
+        conn.commit()
+
+
 class DbTest(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -180,6 +199,137 @@ class HistoryStoreTest(DbTest):
         self.assertEqual(ids(persistence.list_history()[0]), ["a"])
 
 
+class HistoryFilterTest(DbTest):
+    def test_search_text_is_the_name_and_the_prompt_like_inputs_lower_cased(self):
+        prompt = {"6": {"inputs": {"text": "A Woman walks THROUGH a shop", "clip": ["4", 1]}},
+                  "3": {"inputs": {"sampler_name": "euler ancestral", "seed": 1}},
+                  "7": {"inputs": {"text": "second prompt with spaces"}},
+                  "8": "not a node"}
+        self.assertEqual(persistence.search_text("Long Videos", prompt),
+                         "long videos\na woman walks through a shop\nsecond prompt with spaces")
+        self.assertEqual(persistence.search_text(None, prompt), "a woman walks through a shop\nsecond prompt with spaces")
+        self.assertEqual(persistence.search_text(None, None), "")
+
+    def test_status_workflow_and_unnamed_filters_combine(self):
+        for pid, name, state in [("a", "Wf", "success"), ("b", "Wf", "error"), ("c", "Other", "interrupted"),
+                                 ("d", None, "error"), ("e", "Other", "success")]:
+            persistence.record_history(run(pid, name, state))
+        listed = lambda **filters: ids(persistence.list_history(**filters)[0])
+        self.assertEqual(listed(status="error"), ["d", "b"])
+        self.assertEqual(listed(status="interrupted"), ["c"])
+        self.assertEqual(listed(workflow="Other"), ["e", "c"])
+        self.assertEqual(listed(workflow=""), ["d"], '"" is the unnamed runs')
+        self.assertEqual(listed(status="error", workflow="Wf"), ["b"])
+        self.assertEqual(listed(status=None, workflow=None, q=None), ["e", "d", "c", "b", "a"])
+        persistence.record_history(run("f", "100%_v2"))
+        self.assertEqual(listed(workflow="100%_v2"), ["f"])
+        self.assertEqual(listed(workflow="100%"), [], "the workflow filter is an exact match")
+
+    def test_text_search_ignores_case_and_takes_wildcards_literally(self):
+        texts = {"a": "a cat on the sofa at night", "b": "a dog with 100% detail in the sun",
+                 "c": "the snake_case name of a thing", "d": "a folder C:\\new\\images on the disk",
+                 "e": "a Café at the corner of the street"}
+        for pid, text in texts.items():
+            persistence.record_history(run(pid, text=text))
+        persistence.record_history(run("f", name="Cat Videos", text="a dog runs along the beach"))
+        search = lambda q: ids(persistence.list_history(q=q)[0])
+        self.assertEqual(search("CAT"), ["f", "a"], "the workflow name counts too")
+        self.assertEqual(search("CAFÉ"), ["e"])
+        self.assertEqual(search("%"), ["b"])
+        self.assertEqual(search("_"), ["c"])
+        self.assertEqual(search("\\new"), ["d"])
+        self.assertEqual(search("euler"), [], "a one-word input is no prompt")
+        self.assertEqual(search("   "), ["f", "e", "d", "c", "b", "a"], "only spaces: no search")
+
+    def test_filters_combine_with_before_and_after(self):
+        for i in range(6):
+            persistence.record_history(run(f"r{i}", state="error" if i % 2 else "success"))
+        page, more = persistence.list_history(limit=2, status="error")
+        self.assertEqual((ids(page), more), (["r5", "r3"], True))
+        older, more = persistence.list_history(limit=2, before=page[-1]["id"], status="error")
+        self.assertEqual((ids(older), more), (["r1"], False))
+        persistence.record_history(run("new-ok"))
+        persistence.record_history(run("new-err", state="error"))
+        self.assertEqual(ids(persistence.list_history(after=page[0]["id"], status="error")[0]), ["new-err"])
+
+    def test_workflows_with_their_counts_most_recently_run_first(self):
+        for pid, name in [("a", "Wf"), ("b", None), ("c", "Other"), ("d", "Wf"), ("e", None)]:
+            persistence.record_history(run(pid, name))
+        self.assertEqual(persistence.history_workflows(),
+                         [{"name": None, "count": 2}, {"name": "Wf", "count": 2}, {"name": "Other", "count": 1}])
+
+    def test_filters_read_the_covering_index_and_then_only_the_pages_rows(self):
+        with contextlib.closing(sqlite3.connect(persistence._DB_PATH)) as conn:
+            self.assertEqual([row[2] for row in conn.execute("PRAGMA index_info(history_filters)")],
+                             ["status", "workflow", "search"])
+            plan = conn.execute(
+                "EXPLAIN QUERY PLAN SELECT id, run_json, pinned FROM history WHERE id IN (SELECT id FROM history "
+                "INDEXED BY history_filters WHERE id < ? AND status = ? AND workflow = ? AND search LIKE ? ESCAPE '\\' "
+                "ORDER BY id DESC LIMIT ?) ORDER BY id DESC", (9, "error", "Wf", "%cat%", 51)).fetchall()
+        detail = " ".join(row[3] for row in plan)
+        self.assertIn("USING COVERING INDEX history_filters", detail)
+        self.assertIn("USING INTEGER PRIMARY KEY", detail)
+
+
+class HistoryPinTest(DbTest):
+    def test_pinned_runs_are_never_trimmed_and_do_not_count_toward_the_limit(self):
+        self.addCleanup(setattr, persistence, "HISTORY_LIMIT", persistence.HISTORY_LIMIT)
+        persistence.HISTORY_LIMIT = 3
+        persistence.record_history(entry("a"))
+        persistence.record_history(entry("b"))
+        self.assertTrue(persistence.set_pinned("a", True))
+        for pid in "cdef":
+            persistence.record_history(entry(pid))
+        runs = persistence.list_history()[0]
+        self.assertEqual([(r["prompt"][1], r["pinned"]) for r in runs], [("f", False), ("e", False), ("d", False), ("a", True)])
+        self.assertTrue(persistence.set_pinned("a", False))
+        persistence.record_history(entry("g"))
+        self.assertEqual(ids(persistence.list_history()[0]), ["g", "f", "e"], "unpinned, it ages out with the next run")
+        self.assertFalse(persistence.set_pinned("missing", True))
+
+    def test_a_run_recorded_again_keeps_its_pin_and_can_still_be_removed(self):
+        persistence.record_history(entry("a", status="error"))
+        persistence.set_pinned("a", True)
+        persistence.record_history(entry("b"))
+        persistence.record_history(entry("a"))
+        self.assertEqual([(r["prompt"][1], r["pinned"]) for r in persistence.list_history()[0]], [("a", True), ("b", False)])
+        self.assertEqual(persistence.delete_history(["a"]), 1)
+        self.assertEqual(ids(persistence.list_history()[0]), ["b"])
+
+
+class HistoryMigrationTest(DbTest):
+    def test_a_database_from_before_the_filters_gains_pin_and_search(self):
+        path = self.dir / "b.db"
+        with contextlib.closing(sqlite3.connect(path)) as conn:   # the history table as the time estimates left it
+            conn.execute("CREATE TABLE history (id INTEGER PRIMARY KEY AUTOINCREMENT, prompt_id TEXT UNIQUE NOT NULL, "
+                         "run_json TEXT NOT NULL, entry_json TEXT NOT NULL, workflow TEXT, workflow_id TEXT, "
+                         "status TEXT, sig TEXT, duration_ms INTEGER)")
+        insert_raw(path, run("a", name="Long Videos"))
+        insert_raw(path, run("b", text="a cat on the sofa at night"))
+        persistence._DB_PATH = str(path)
+        with contextlib.redirect_stdout(io.StringIO()):
+            persistence._init_db()
+        self.assertEqual(ids(persistence.list_history(q="long videos")[0]), ["a"])
+        self.assertEqual(ids(persistence.list_history(q="sofa")[0]), ["b"])
+        self.assertEqual([r["pinned"] for r in persistence.list_history()[0]], [False, False])
+        self.assertTrue(persistence.set_pinned("a", True))
+
+    def test_the_backfill_runs_once_per_version_and_again_after_a_crash_before_its_commit(self):
+        insert_raw(persistence._DB_PATH, run("a"))   # derived columns NULL, as a row the back-fill hasn't reached
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            persistence._init_db()
+        self.assertEqual(out.getvalue(), "")
+        self.assertEqual(persistence.list_history(q="sunlit")[0], [], "a start at the current version reads no entries")
+        with contextlib.closing(sqlite3.connect(persistence._DB_PATH)) as conn:
+            conn.execute("PRAGMA user_version = 0")   # what a crash before the back-fill's commit leaves
+        with contextlib.redirect_stdout(out):
+            persistence._init_db()
+        self.assertEqual(ids(persistence.list_history(q="sunlit")[0]), ["a"])
+        with contextlib.closing(sqlite3.connect(persistence._DB_PATH)) as conn:
+            self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], persistence.HISTORY_VERSION)
+
+
 class FakeQueue:
     """The PromptQueue surface persistence wraps, plus ComfyUI's history bookkeeping."""
     def __init__(self):
@@ -238,7 +388,7 @@ class TaskDoneHookTest(DbTest):
 
 class HistoryRoutesTest(DbTest, unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        routes = web.RouteTableDef()
+        self.routes = routes = web.RouteTableDef()
         persistence._register_routes(types.SimpleNamespace(routes=routes))
         app = web.Application()
         app.add_routes(routes)
@@ -263,3 +413,23 @@ class HistoryRoutesTest(DbTest, unittest.IsolatedAsyncioTestCase):
         res = await self.client.post("/queue_workbench/history/delete", json={"prompt_ids": ["a"]})
         self.assertEqual(await res.json(), {"deleted": 1})
         self.assertEqual((await self.client.get("/queue_workbench/history/a")).status, 404)
+
+    async def test_filter_workflows_and_pin_routes(self):
+        for pid, name, state in [("a", "Wf", "success"), ("b", None, "error"), ("c", "Wf", "error")]:
+            persistence.record_history(run(pid, name, state))
+        listed = lambda query: self.client.get(f"/queue_workbench/history?{query}")
+        self.assertEqual(ids((await (await listed("status=error&workflow=Wf")).json())["runs"]), ["c"])
+        self.assertEqual(ids((await (await listed("workflow=")).json())["runs"]), ["b"])
+        self.assertEqual(ids((await (await listed("q=SUNLIT+flower&status=")).json())["runs"]), ["c", "b", "a"])
+        self.assertEqual((await listed("status=failed")).status, 400)
+        data = await (await self.client.get("/queue_workbench/history/workflows")).json()
+        self.assertEqual(data, {"workflows": [{"name": "Wf", "count": 2}, {"name": None, "count": 1}]})
+        res = await self.client.post("/queue_workbench/history/pin", json={"prompt_id": "a", "pinned": True})
+        self.assertEqual(await res.json(), {"pinned": True})
+        self.assertEqual([r["pinned"] for r in (await (await listed("")).json())["runs"]], [False, False, True])
+        res = await self.client.post("/queue_workbench/history/pin", json={"prompt_id": "gone", "pinned": True})
+        self.assertEqual(res.status, 404)
+
+    async def test_the_workflows_route_is_added_before_the_run_route(self):
+        paths = [route.path for route in self.routes]
+        self.assertLess(paths.index("/queue_workbench/history/workflows"), paths.index("/queue_workbench/history/{prompt_id}"))

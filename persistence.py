@@ -21,8 +21,8 @@ row origin values:
             held client-side); persisted so a pause+shutdown doesn't lose them
   'saved' — backlog from a previous session, awaiting manual restore/discard
 
-Finished runs are also kept (table `history`, newest HISTORY_LIMIT) for the
-panel's History tab, since ComfyUI's own history is RAM-only as well.
+Finished runs are also kept (table `history`, newest HISTORY_LIMIT plus the pinned
+ones) for the panel's History tab, since ComfyUI's own history is RAM-only as well.
 """
 import os
 import re
@@ -74,13 +74,16 @@ def _init_db():
                 workflow_id TEXT,
                 status      TEXT,
                 sig         TEXT,
-                duration_ms INTEGER
+                duration_ms INTEGER,
+                search      TEXT,
+                pinned      INTEGER NOT NULL DEFAULT 0
             )
         """)
         _migrate_history(conn)
         conn.execute(
             "CREATE INDEX IF NOT EXISTS history_estimates ON history(workflow, workflow_id, sig, status, duration_ms)"
         )
+        conn.execute("CREATE INDEX IF NOT EXISTS history_filters ON history(status, workflow, search)")
         # Anything still marked live/held when we boot was orphaned by the last
         # shutdown — promote it to the restorable backlog.
         cur = conn.execute(
@@ -179,12 +182,16 @@ def _install_queue_hooks(prompt_queue):
 # Run history — finished runs, kept across restarts (ComfyUI's own history is
 # RAM-only). run_json is what the panel lists, entry_json the full entry.
 # ---------------------------------------------------------------------------
-HISTORY_LIMIT = 200
+HISTORY_LIMIT = 200   # unpinned runs; pinned ones are kept on top of these
 
 # Derived columns, filled from each run's entry: what the time estimates (estimates.py)
 # and history filters query without parsing every stored entry. NULL where a run doesn't say.
 HISTORY_COLUMNS = (("workflow", "TEXT"), ("workflow_id", "TEXT"), ("status", "TEXT"),
-                   ("sig", "TEXT"), ("duration_ms", "INTEGER"))
+                   ("sig", "TEXT"), ("duration_ms", "INTEGER"), ("search", "TEXT"))
+# PRAGMA user_version the history table is at. Bump it when a column is added or a derived
+# column's rule changes: the next start adds the column and re-derives every stored run once.
+HISTORY_VERSION = 1
+HISTORY_STATUSES = ("success", "error", "interrupted")   # what run_status stores
 
 # Inputs that change how long a run takes. Primitive nodes carry the input's name in their
 # title, read like the panel's setting chips do: "Float (duration, seconds)" -> "duration"
@@ -268,29 +275,41 @@ def run_workflow(extra_data):
     return (name or None), (str(workflow_id) if workflow_id else None)
 
 
+def search_text(name, prompt):
+    """What the history's text filter searches: the workflow name and every prompt-like string
+    input (3+ spaces) of the API prompt, lower-cased, one per line."""
+    texts = [value for node in _dict(prompt).values() for value in _dict(_dict(node).get("inputs")).values()
+             if isinstance(value, str) and value.count(" ") >= 3]
+    return "\n".join([name, *texts] if name else texts).lower()
+
+
 def history_columns(entry):
-    """The HISTORY_COLUMNS values of a history entry: (workflow, workflow_id, status, sig, duration_ms)."""
+    """The HISTORY_COLUMNS values of a history entry: (workflow, workflow_id, status, sig, duration_ms, search)."""
     entry = _dict(entry)
     prompt = entry.get("prompt")
     prompt = prompt if isinstance(prompt, (list, tuple)) else []
     graph = prompt[2] if len(prompt) > 2 else None
     extra_data = prompt[3] if len(prompt) > 3 else None
     status = entry.get("status")
-    return (*run_workflow(extra_data), run_status(status), time_signature(graph), run_duration_ms(status))
+    workflow, workflow_id = run_workflow(extra_data)
+    return (workflow, workflow_id, run_status(status), time_signature(graph), run_duration_ms(status),
+            search_text(workflow, graph))
 
 
 def _migrate_history(conn):
-    """Give a history table from before the derived columns those columns, and back-fill every
-    row still missing them (WHERE sig IS NULL — a parsed entry always gets a string signature,
-    "" at minimum). Runs on every start, not just when the ALTER just added the columns: the
-    ALTER autocommits immediately, so a crash between it and the one-time backfill used to leave
-    those rows NULL for good. A row whose entry can't be read keeps NULLs and is retried next start."""
+    """Bring a history table below HISTORY_VERSION up to date: add the columns it lacks and
+    re-derive the HISTORY_COLUMNS of every row from its entry. The back-fill and the new
+    user_version commit together with _init_db, so a start that crashes before that redoes it,
+    and a start at the current version reads no entries at all. (ALTERs autocommit, hence the
+    check for columns already there.) A row whose entry can't be read keeps NULLs."""
+    if conn.execute("PRAGMA user_version").fetchone()[0] >= HISTORY_VERSION:
+        return
     present = {row[1] for row in conn.execute("PRAGMA table_info(history)")}
-    missing = [(name, kind) for name, kind in HISTORY_COLUMNS if name not in present]
-    for name, kind in missing:
-        conn.execute(f"ALTER TABLE history ADD COLUMN {name} {kind}")
+    for name, kind in (*HISTORY_COLUMNS, ("pinned", "INTEGER NOT NULL DEFAULT 0")):
+        if name not in present:
+            conn.execute(f"ALTER TABLE history ADD COLUMN {name} {kind}")
     assignments = ", ".join(f"{name}=?" for name, _ in HISTORY_COLUMNS)
-    rows = conn.execute("SELECT id, entry_json FROM history WHERE sig IS NULL").fetchall()
+    rows = conn.execute("SELECT id, entry_json FROM history").fetchall()
     filled = 0
     for row_id, entry_json in rows:
         try:
@@ -299,6 +318,7 @@ def _migrate_history(conn):
             continue
         conn.execute(f"UPDATE history SET {assignments} WHERE id=?", (*columns, row_id))
         filled += 1
+    conn.execute(f"PRAGMA user_version = {HISTORY_VERSION}")
     if filled:
         print(f"[QueueWorkbench] history: backfilled {', '.join(name for name, _ in HISTORY_COLUMNS)} "
               f"for {len(rows)} finished run(s)")
@@ -333,41 +353,67 @@ def _clean_status(status):
 
 
 def record_history(entry):
-    """Store a finished run (a ComfyUI history entry) and keep the newest HISTORY_LIMIT."""
+    """Store a finished run (a ComfyUI history entry) and keep the newest HISTORY_LIMIT unpinned
+    runs plus the pinned ones. A run recorded again under its prompt_id keeps its pin."""
     cleaned = dict(entry)
     cleaned["status"] = _clean_status(entry.get("status"))
     full = {key: cleaned.get(key) for key in ("prompt", "outputs", "status")}
     run_json = json.dumps(_list_row(cleaned))
     entry_json = json.dumps(full)
+    prompt_id = entry["prompt"][1]
     with _db_lock, _connect() as conn:
+        old = conn.execute("SELECT pinned FROM history WHERE prompt_id=?", (prompt_id,)).fetchone()
         conn.execute(
             "INSERT OR REPLACE INTO history (prompt_id, run_json, entry_json, workflow, workflow_id, status, sig, "
-            "duration_ms) VALUES (?,?,?,?,?,?,?,?)",
-            (entry["prompt"][1], run_json, entry_json, *history_columns(cleaned)),
+            "duration_ms, search, pinned) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (prompt_id, run_json, entry_json, *history_columns(cleaned), old[0] if old else 0),
         )
         conn.execute(
-            "DELETE FROM history WHERE id NOT IN "
-            "(SELECT id FROM history ORDER BY id DESC LIMIT ?)",
+            "DELETE FROM history WHERE pinned = 0 AND id NOT IN "
+            "(SELECT id FROM history WHERE pinned = 0 ORDER BY id DESC LIMIT ?)",
             (HISTORY_LIMIT,),
         )
 
 
-def list_history(limit=50, before=None, after=None):
-    """Finished runs, newest first: every run newer than `after`, else the newest `limit`
-    (older than `before` if given). Returns (runs, more); more = older runs exist."""
+def list_history(limit=50, before=None, after=None, status=None, workflow=None, q=None):
+    """Finished runs, newest first: every run newer than `after`, else the newest `limit` (older
+    than `before` if given) — of one status, one workflow ("" = the unnamed runs) and containing
+    the text q in the workflow name or a prompt, where given. Returns (runs, more); more = older
+    matching runs exist."""
+    where, args = [], []
     if after is not None:
-        sql, args = "WHERE id > ? ORDER BY id DESC", (after,)
+        where.append("id > ?")
+        args.append(after)
     elif before is not None:
-        sql, args = "WHERE id < ? ORDER BY id DESC LIMIT ?", (before, limit + 1)
-    else:
-        sql, args = "ORDER BY id DESC LIMIT ?", (limit + 1,)
+        where.append("id < ?")
+        args.append(before)
+    if status:
+        where.append("status = ?")
+        args.append(status)
+    if workflow == "":
+        where.append("workflow IS NULL")
+    elif workflow:
+        where.append("workflow = ?")
+        args.append(workflow)
+    q = (q or "").strip().lower()
+    if q:
+        where.append("search LIKE ? ESCAPE '\\'")
+        args.append("%" + re.sub(r"[\\%_]", r"\\\g<0>", q) + "%")
+    sql = "WHERE " + " AND ".join(where) if where else ""
+    if after is None:
+        sql += " ORDER BY id DESC LIMIT ?"
+        args.append(limit + 1)
+    # The filter columns sit behind the big JSON columns, so reading them from the table walks
+    # every row's overflow pages (200 runs of 700 KB workflows: ~40 ms, ~150 ms off a cold disk
+    # cache). The ids come from the covering history_filters index instead (<2 ms / ~20 ms).
     with _db_lock, _connect() as conn:
-        rows = conn.execute(f"SELECT id, run_json FROM history {sql}", args).fetchall()
+        rows = conn.execute(f"SELECT id, run_json, pinned FROM history WHERE id IN "
+                            f"(SELECT id FROM history INDEXED BY history_filters {sql}) ORDER BY id DESC", args).fetchall()
     more = after is None and len(rows) > limit
     runs = []
-    for row_id, run_json in (rows[:limit] if more else rows):
+    for row_id, run_json, pinned in (rows[:limit] if more else rows):
         try:
-            runs.append({"id": row_id, **json.loads(run_json)})
+            runs.append({"id": row_id, "pinned": bool(pinned), **json.loads(run_json)})
         except ValueError:
             pass
     return runs, more
@@ -378,6 +424,20 @@ def get_history_entry(prompt_id):
     with _db_lock, _connect() as conn:
         row = conn.execute("SELECT entry_json FROM history WHERE prompt_id=?", (prompt_id,)).fetchone()
     return json.loads(row[0]) if row else None
+
+
+def set_pinned(prompt_id, pinned):
+    """Pin or unpin a finished run; False if it isn't in the history."""
+    with _db_lock, _connect() as conn:
+        return conn.execute("UPDATE history SET pinned=? WHERE prompt_id=?", (int(pinned), prompt_id)).rowcount == 1
+
+
+def history_workflows():
+    """[{"name", "count"}] of the stored runs' workflows, the most recently run first; name None
+    for the unnamed runs."""
+    with _db_lock, _connect() as conn:
+        rows = conn.execute("SELECT workflow, count(*) FROM history GROUP BY workflow ORDER BY max(id) DESC").fetchall()
+    return [{"name": name, "count": count} for name, count in rows]
 
 
 def delete_history(prompt_ids):
@@ -555,7 +615,8 @@ def _register_routes(server):
     @routes.get("/queue_workbench/history")
     async def get_history(request):
         """Finished runs, newest first: ?limit=50[&before=<id>] pages back, ?after=<id>
-        returns the runs recorded since. Workflows are cut down (see _list_row)."""
+        returns the runs recorded since; &status=, &workflow= ("" = unnamed) and &q= narrow
+        either to the matching runs. Workflows are cut down (see _list_row)."""
         query = request.rel_url.query
         try:
             limit = int(query.get("limit", 50))
@@ -563,8 +624,18 @@ def _register_routes(server):
             after = int(query["after"]) if "after" in query else None
         except ValueError:
             return web.json_response({"error": "limit, before and after must be integers"}, status=400)
-        runs, more = list_history(limit, before, after)
+        status = query.get("status")
+        if status and status not in HISTORY_STATUSES:
+            return web.json_response({"error": f"status must be one of {', '.join(HISTORY_STATUSES)}"}, status=400)
+        runs, more = list_history(limit, before, after, status, query.get("workflow"), query.get("q"))
         return web.json_response({"runs": runs, "more": more})
+
+    # Before /history/{prompt_id}: older aiohttp (3.9) matches routes in the order they were added
+    # and would take "workflows" for a prompt_id
+    @routes.get("/queue_workbench/history/workflows")
+    async def get_history_workflows(request):
+        """The stored runs' workflows with their run counts, most recently run first (name null = unnamed)."""
+        return web.json_response({"workflows": history_workflows()})
 
     @routes.get("/queue_workbench/history/{prompt_id}")
     async def get_history_run(request):
@@ -582,6 +653,18 @@ def _register_routes(server):
         except Exception:
             body = {}
         return web.json_response({"deleted": delete_history(body.get("prompt_ids", []))})
+
+    @routes.post("/queue_workbench/history/pin")
+    async def history_pin(request):
+        """Body {"prompt_id", "pinned": true|false}: a pinned run is never trimmed from the history."""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        pinned = bool(body.get("pinned"))
+        if not set_pinned(body.get("prompt_id"), pinned):
+            return web.json_response({"error": "not in history"}, status=404)
+        return web.json_response({"pinned": pinned})
 
 
 # ---------------------------------------------------------------------------
