@@ -813,6 +813,78 @@ function requeueBody(item, clientId) {
     return { prompt: item[2], extra_data: extra, client_id: clientId, partial_execution_targets: item[4] };
 }
 
+// Variations: a run queued again with every seed re-rolled. A seed is any number input named
+// like one, except 0 (nodes with per-clip seed slots often leave unused ones at 0).
+const isSeed = (input, value) => /seed/i.test(input) && typeof value === "number" && value !== 0;
+
+// A seed in [1, 2^50), the range of ComfyUI's own "randomize", other than old
+function newSeed(old, random) {
+    let seed = old;
+    while (seed === old) seed = 1 + Math.floor(random() * (2 ** 50 - 1));
+    return seed;
+}
+
+// The GUI nodes an API node id passes through (nodes = workflowNodes(workflow)): "459:451" is
+// root node 459, a subgraph instance whose type is the subgraph's id, then node 451 inside
+// that subgraph; "a:b:c" nests deeper. [] when the workflow has no such path (a script's run,
+// legacy group nodes).
+function guiPath(nodes, nodeId) {
+    const path = [];
+    let graph  = "root";
+    for (const id of nodeId.split(":")) {
+        const node = nodes.get(`${graph}:${id}`);
+        if (!node) return [];
+        path.push(node);
+        graph = node.type;
+    }
+    return path;
+}
+
+// Swaps the first widget value strictly equal to old; widgets_values is an array or, on VHS
+// nodes, an object. Only the first: a small seed can equal a later widget of the same node
+// (KSampler [seed, control, steps, cfg, …] with seed 1 and cfg 1).
+function swapWidgetValue(values, old, seed) {
+    if (!values || typeof values !== "object") return;
+    const key = Object.keys(values).find(k => values[k] === old);
+    if (key !== undefined) values[key] = seed;
+}
+
+// Copies of a run's graph and workflow with every seed re-rolled: one new value per distinct
+// old value, so seeds that matched still match; linked seeds ([id, slot]) change at their
+// source. The workflow follows so the outputs load with the seeds really used: each GUI node
+// on the API node's path takes each new seed once (a seed promoted to a subgraph input lives
+// on the instance node, the node inside keeps a stale copy); no GUI node, no change there.
+// changed = re-rolled inputs; workflow is null for a run without one.
+function rerollSeeds(item, random = Math.random) {
+    const prompt   = structuredClone(item[2] || {});
+    const workflow = structuredClone(item[3]?.extra_pnginfo?.workflow ?? null);
+    const nodes    = workflowNodes(workflow);
+    const fresh    = new Map();   // old seed -> { seed, done: GUI nodes that already took it }
+    let changed    = 0;
+    for (const [nodeId, node] of Object.entries(prompt)) {
+        for (const [input, old] of Object.entries(node?.inputs || {})) {
+            if (!isSeed(input, old)) continue;
+            if (!fresh.has(old)) fresh.set(old, { seed: newSeed(old, random), done: new Set() });
+            const { seed, done } = fresh.get(old);
+            node.inputs[input] = seed;
+            changed++;
+            for (const guiNode of guiPath(nodes, nodeId)) {
+                if (done.has(guiNode)) continue;
+                done.add(guiNode);
+                swapWidgetValue(guiNode.widgets_values, old, seed);
+            }
+        }
+    }
+    return { prompt, workflow, changed };
+}
+
+// requeueBody of the run with its seeds re-rolled
+function variationBody(item, clientId, random = Math.random) {
+    const { prompt, workflow } = rerollSeeds(item, random);
+    const extra = workflow ? { ...item[3], extra_pnginfo: { ...item[3].extra_pnginfo, workflow } } : item[3];
+    return requeueBody([item[0], item[1], prompt, extra, item[4]], clientId);
+}
+
 // New runs (newest first) go on top; a prompt_id that finished again keeps only its newest run
 function mergeNewRuns(runs, incoming) {
     const ids = new Set(incoming.map(r => r.item[1]));
@@ -846,9 +918,9 @@ function detailHtml(item, info, where, run = null) {
     const gallery = (label, thumbs, border) => thumbs.length ? `
         ${label ? `<div style="margin-top:12px;font-size:11px;color:#8a8a8a;">${label}</div>` : ""}
         <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:${label ? 4 : 12}px;">${thumbs.map(t => thumbHtml(t, 112, border)).join("")}</div>` : "";
-    // Unique non-zero seeds (nodes with per-clip seed slots often leave unused ones at 0)
+    // Unique seeds, the values a variation re-rolls
     const seeds  = [...new Set(Object.values(prompt).flatMap(n => Object.entries(n?.inputs || {}))
-        .filter(([k, v]) => /seed/i.test(k) && typeof v === "number" && v !== 0).map(([, v]) => v))];
+        .filter(([k, v]) => isSeed(k, v)).map(([, v]) => v))];
     const row = (label, color, body) => `
         <div style="display:grid;grid-template-columns:64px 1fr;gap:8px;align-items:baseline;margin-top:6px;">
             <span style="color:${color};font-size:11px;">${label}</span>

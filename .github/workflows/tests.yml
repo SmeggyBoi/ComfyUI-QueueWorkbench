@@ -17,4 +17,5 @@ jobs:
       - run: node tests/test_edit_diff.mjs
       - run: node tests/test_history.mjs
       - run: node tests/test_estimates.mjs
+      - run: node tests/test_variations.mjs
       - run: python -m unittest discover -s tests -v
