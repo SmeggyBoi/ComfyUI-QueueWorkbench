@@ -74,6 +74,25 @@ class DbTest(unittest.TestCase):
                                 (prompt_id,)).fetchone()
 
 
+class IndexTest(DbTest):
+    def test_init_db_creates_a_covering_index_for_the_estimate_queries(self):
+        with contextlib.closing(sqlite3.connect(persistence._DB_PATH)) as conn:
+            names = {row[1] for row in conn.execute("PRAGMA index_list(history)")}
+            self.assertIn("history_estimates", names)
+
+    def test_recent_durations_queries_use_the_index(self):
+        with contextlib.closing(sqlite3.connect(persistence._DB_PATH)) as conn:
+            for where, args in [("workflow = ?", ("Wf",)), ("workflow IS NULL AND workflow_id = ?", ("wf-1",))]:
+                plan = conn.execute(
+                    f"EXPLAIN QUERY PLAN SELECT duration_ms FROM history WHERE status = 'success' "
+                    f"AND duration_ms IS NOT NULL AND {where} AND sig = ? ORDER BY id DESC LIMIT ?",
+                    (*args, "sig", 5),
+                ).fetchall()
+                detail = " ".join(row[3] for row in plan)
+                self.assertTrue("USING INDEX history_estimates" in detail or "USING COVERING INDEX history_estimates" in detail,
+                                 (where, detail))
+
+
 class TimeSignatureTest(unittest.TestCase):
     def test_numeric_time_inputs_sorted_with_names_from_primitive_titles(self):
         self.assertEqual(persistence.time_signature(graph()), SIG)
@@ -130,6 +149,29 @@ class HistoryColumnsTest(DbTest):
         for extra_data in (None, {}, {"extra_pnginfo": None}, {"extra_pnginfo": {"workflow": None}}):
             self.assertEqual(persistence.run_workflow(extra_data), (None, None), extra_data)
         self.assertEqual(persistence.run_workflow({"extra_pnginfo": {"workflow": {"id": "x", "extra": None}}}), (None, "x"))
+
+    def test_the_unsaved_workflow_placeholder_name_counts_as_no_name(self):
+        def workflow(qm_name):
+            return {"extra_pnginfo": {"workflow": {"id": "x", "extra": {"qm_name": qm_name}}}}
+        for qm_name in ("Unsaved Workflow.json", "Unsaved Workflow (2).json", "Unsaved Workflow (17).json"):
+            self.assertEqual(persistence.run_workflow(workflow(qm_name)), (None, "x"), qm_name)
+        # a real name that merely starts with the phrase is kept
+        self.assertEqual(persistence.run_workflow(workflow("Unsaved Workflowish.json")), ("Unsaved Workflowish", "x"))
+
+    def test_an_interrupted_migration_backfills_rows_still_null_once_the_columns_are_there(self):
+        path = self.dir / "interrupted.db"
+        with contextlib.closing(sqlite3.connect(path)) as conn:
+            conn.execute("CREATE TABLE history (id INTEGER PRIMARY KEY AUTOINCREMENT, prompt_id TEXT UNIQUE NOT NULL, "
+                         "run_json TEXT NOT NULL, entry_json TEXT NOT NULL, workflow TEXT, workflow_id TEXT, "
+                         "status TEXT, sig TEXT, duration_ms INTEGER)")
+            conn.execute("INSERT INTO history (prompt_id, run_json, entry_json) VALUES (?,?,?)",
+                         ("a", "{}", json.dumps(entry("a", ms=95_000))))
+            conn.execute("INSERT INTO history (prompt_id, run_json, entry_json) VALUES ('bad', '{}', 'not json')")
+            conn.commit()
+        persistence._DB_PATH = str(path)
+        persistence._init_db()   # the columns are already there (ALTER autocommitted); only the backfill was interrupted
+        self.assertEqual(self.columns("a"), ("Wf", "wf-1", "success", SIG, 95_000), "NULL row gets backfilled even without a column migration")
+        self.assertIsNone(self.columns("bad")[3], "an unparseable row stays NULL without aborting _init_db")
 
     def test_an_older_history_table_gains_the_columns_filled_in_from_its_runs(self):
         path = self.dir / "old.db"

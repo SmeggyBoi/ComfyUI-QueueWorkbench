@@ -5,8 +5,8 @@ import fs from "node:fs";
 const src = fs.readFileSync(new URL("../web/queue_workbench.js", import.meta.url), "utf8").replace(/^import .*$/mg, "");
 globalThis.window   = { matchMedia: () => ({ matches: true }) };
 globalThis.document = { getElementById: () => null };
-const { fmtMinutes, leftText, runningRemaining, startTimes, runningProgress, badgeText, queueEndText, estimateLine, detailHtml, groupInfo, fmtTime } = new Function("app", "api",
-    src + "\nreturn { fmtMinutes, leftText, runningRemaining, startTimes, runningProgress, badgeText, queueEndText, estimateLine, detailHtml, groupInfo, fmtTime };")({ registerExtension() {} }, { addEventListener() {} });
+const { fmtMinutes, leftText, runningRemaining, startTimes, runningProgress, showProgress, badgeText, queueEndText, estimateLine, detailHtml, groupInfo, fmtTime } = new Function("app", "api",
+    src + "\nreturn { fmtMinutes, leftText, runningRemaining, startTimes, runningProgress, showProgress, badgeText, queueEndText, estimateLine, detailHtml, groupInfo, fmtTime };")({ registerExtension() {} }, { addEventListener() {} });
 
 const tests = [];
 const test = (name, fn) => tests.push([name, fn]);
@@ -64,6 +64,11 @@ test("a running run without an estimate makes every start a lower bound; a bound
     assert.deepEqual(startTimes(e, ["a", "b"]), { a: null, b: { at: NOW + 5 * MIN, exact: false } });
 });
 
+test("a running run past its estimate makes every start a lower bound too, instead of an exact time that slides every poll", () => {
+    const e = est({ running: { prompt_id: "run", started_at: NOW - 40 * MIN, ...known(30) }, pending: { a: known(5), b: known(5) } });
+    assert.deepEqual(startTimes(e, ["a", "b"]), { a: null, b: { at: NOW + 5 * MIN, exact: false } });
+});
+
 test("running row: time-based bar capped at 99 %, then running longer than usual", () => {
     assert.deepEqual(runningProgress(est(), RUN_ITEM), { fraction: 20 / 30, label: "~10 min left" });
     const almost = est({ running: { prompt_id: "run", started_at: NOW - 29.9 * MIN, ...known(30) } });
@@ -82,6 +87,18 @@ test("running row without an estimate: the current node's progress under its tit
     assert.deepEqual(runningProgress(unstarted, RUN_ITEM), { fraction: 0.25, label: "High noise · 2/8" }, "start unknown");
     assert.equal(runningProgress(est(), [0, "other", {}, {}, []]), null, "estimates of another run");
     assert.equal(runningProgress(null, RUN_ITEM), null);
+});
+
+test("the running bar's first width lands without a transition; a rebuilt row jumps instead of replaying the 0->x% flash", () => {
+    const bar   = { style: {}, dataset: {}, getAnimations: () => [], animate: () => {} };
+    const label = { textContent: "" };
+    const block = { style: {}, querySelector: sel => sel === ".qm-run-label" ? label : bar };
+    showProgress(block, { fraction: 0.4, label: "4m left" });
+    assert.equal(bar.style.width, "40.0%");
+    assert.equal(bar.style.transition, undefined, "a freshly rendered bar jumps straight there, no 0 -> 40% flash");
+    showProgress(block, { fraction: 0.6, label: "3m left" });
+    assert.equal(bar.style.width, "60.0%");
+    assert.equal(bar.style.transition, "width 0.5s linear", "once the first width has landed, later polls on the same element animate smoothly");
 });
 
 test("toolbar badge and queue end", () => {
@@ -108,7 +125,11 @@ test("detail line names the basis and run count; only pending and running runs g
     assert.equal(estimateLine(NONE), "");
     const item = [0, "p1", { "3": { class_type: "KSampler", inputs: { steps: 8 } } }, {}, ["9"]];
     const info = groupInfo([item]).get("p1");
-    for (const where of ["Running", "#2 of 3"]) assert.ok(detailHtml(item, info, where).includes(`class="qm-est-line" data-prompt-id="p1"`), where);
+    for (const where of ["Running", "#2 of 3"]) {
+        const html = detailHtml(item, info, where);
+        assert.ok(html.includes(`class="qm-est-line" data-est-id="p1"`), where);
+        assert.ok(!html.includes("data-prompt-id"), "the estimate placeholder must not carry the row-identity attribute (plan A's row lookups match on it)");
+    }
     assert.ok(!detailHtml(item, info, "Saved").includes("qm-est-line"));
     assert.ok(!detailHtml(item, info, "✓ Finished", { id: 1, item, outputs: {}, status: null }).includes("qm-est-line"));
 });

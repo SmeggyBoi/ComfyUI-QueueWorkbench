@@ -8,7 +8,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-const BUILD = "2026-10-03g";
+const BUILD = "2026-10-03h";
 
 // Stale-JS detection (PWA caches extension JS hard): compare this bundle's BUILD
 // against the stamp the backend reads from web/queue_workbench.js ON DISK.
@@ -877,7 +877,7 @@ function detailHtml(item, info, where, run = null) {
             </span>
         </div>
         <div style="margin-top:2px;font-size:11px;color:#777;">Queued ${esc(queuedAt(item))}<span style="margin-left:10px;font-family:monospace;">${esc(item[1])}</span>${item[3]?.qm_retry_of ? `<span style="margin-left:10px;color:#e3ad54;">↻ Retry of ${esc(shortId(item[3].qm_retry_of))}</span>` : ""}</div>
-        ${!run && (where === "Running" || where.startsWith("#")) ? `<div class="qm-est-line" data-prompt-id="${esc(item[1])}" style="display:none;margin-top:2px;font-size:11px;color:#e3ad54;"></div>` : ""}
+        ${!run && (where === "Running" || where.startsWith("#")) ? `<div class="qm-est-line" data-est-id="${esc(item[1])}" style="display:none;margin-top:2px;font-size:11px;color:#e3ad54;"></div>` : ""}
         ${error ? `<div style="margin-top:8px;max-height:120px;overflow-y:auto;color:#f88;font-size:12px;white-space:pre-wrap;word-break:break-word;user-select:text;">${esc([error.node, error.message].filter(Boolean).join(": "))}</div>` : ""}
         ${gallery("Outputs", outputs, OUTPUT_BORDER)}
         ${gallery(outputs.length ? "Inputs" : "", info.thumbs, "#3a3a3a")}
@@ -1414,17 +1414,20 @@ function runningRemaining(est) {
 
 // prompt_id -> { at, exact } | null for the pending runs in queue order: the server's now +
 // the running run's remaining time + the estimates of the runs before it. After a run without
-// an estimate (the running one included) the time is only a lower bound (exact false, shown
-// "starts ≥ ~21:10"); a lower bound that is just "now" says nothing and is null. Runs the
-// estimates don't list yet (queued since the last fetch) count as runs without an estimate.
+// an estimate, or one running past its own estimate (the running one included either way) the
+// time is only a lower bound (exact false, shown "starts ≥ ~21:10"); a lower bound that is just
+// "now" says nothing and is null. Runs the estimates don't list yet (queued since the last
+// fetch) count as runs without an estimate.
 function startTimes(est, pendingIds) {
     const starts = {};
     if (!est) return starts;
     let at    = est.now;
     let exact = true;
     if (est.running) {
+        const r = est.running;
+        const overdue = r.estimate_ms != null && r.started_at != null && est.now - r.started_at >= r.estimate_ms;
         const left = runningRemaining(est);
-        if (left == null) exact = false;
+        if (left == null || overdue) exact = false;
         else at += left;
     }
     for (const id of pendingIds) {
@@ -1507,14 +1510,14 @@ function applyEstimates() {
     if (eta) eta.textContent = end ? ` · ${end}` : "";
     const starts = startTimes(est, pendingSorted().map(it => it[1]));
     for (const el of document.querySelectorAll("#qm-pending .qm-start")) {
-        const s = starts[el.dataset.promptId];
+        const s = starts[el.dataset.estId];
         el.textContent = s ? ` · starts ${s.exact ? "" : "≥ "}~${fmtTime(s.at)}` : "";
     }
     const running = (queueData.queue_running || [])[0];
     const block   = document.querySelector("#qm-running .qm-run-progress");
     if (block) showProgress(block, running ? runningProgress(est, running) : null);
     for (const el of document.querySelectorAll(".qm-est-line")) {
-        const id = el.dataset.promptId;
+        const id = el.dataset.estId;
         el.textContent   = estimateLine(est?.running?.prompt_id === id ? est.running : est?.pending?.[id]);
         el.style.display = el.textContent ? "block" : "none";
     }
@@ -1539,7 +1542,14 @@ function showProgress(block, p) {
                              { duration: 1400, iterations: Infinity, easing: "ease-in-out" });
         }
     }
-    if (mode === "determinate") bar.style.width = `${(p.fraction * 100).toFixed(1)}%`;
+    if (mode === "determinate") {
+        // No transition on a bar's first width write: a row rebuilt from scratch (any queue
+        // change, not just this run starting) must jump straight to its current fill instead of
+        // replaying a 0 -> x% animation every time. Later writes on the same element animate.
+        if (bar.dataset.widthSet) bar.style.transition = "width 0.5s linear";
+        else bar.dataset.widthSet = "1";
+        bar.style.width = `${(p.fraction * 100).toFixed(1)}%`;
+    }
 }
 
 let lastRenderKey = null; // skip rebuilding the DOM on polls where nothing changed
@@ -1616,7 +1626,7 @@ function renderQueueRows() {
                 </span>
                 <button onclick="event.stopPropagation();window._qmInterrupt()" style="background:#8b0000;border:none;color:#fff;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:11px;flex-shrink:0;">Interrupt</button>
                 <div class="qm-run-progress" style="display:none;width:100%;margin-top:5px;">
-                    <div style="height:3px;background:#2a3a2a;border-radius:2px;overflow:hidden;"><div class="qm-run-bar" style="height:100%;width:0;background:#6f6;border-radius:2px;transition:width 0.5s linear;"></div></div>
+                    <div style="height:3px;background:#2a3a2a;border-radius:2px;overflow:hidden;"><div class="qm-run-bar" style="height:100%;width:0;background:#6f6;border-radius:2px;"></div></div>
                     <div class="qm-run-label" style="margin-top:3px;font-size:10px;color:#6a6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"></div>
                 </div>
                 ${chipsRowHtml(chips)}
@@ -1695,7 +1705,7 @@ function renderQueueRows() {
                 <span class="qm-drag-handle" style="color:#555;font-size:16px;cursor:grab;flex-shrink:0;touch-action:none;padding:8px 10px;margin:-8px -10px;">⠿</span>
                 <span style="display:flex;gap:3px;flex-shrink:0;">${thumbsHtml(thumbs, 44, "#444", "#333")}</span>
                 <span style="display:flex;flex-direction:column;gap:2px;overflow:hidden;min-width:0;">
-                    <span style="color:#aaa;font-size:12px;white-space:nowrap;">#${i + 1} <span style="color:#666;font-size:11px;">· ${queuedAt(item)}<span class="qm-start" data-prompt-id="${esc(id)}" style="color:#9a9a9a;"></span> · <span class="qm-load-workflow" data-index="${i}" style="color:#7b9cfa;cursor:pointer;text-decoration:underline;text-decoration-style:dotted;" title="Load this workflow onto canvas">${shortId(id)}</span></span></span>
+                    <span style="color:#aaa;font-size:12px;white-space:nowrap;">#${i + 1} <span style="color:#666;font-size:11px;">· ${queuedAt(item)}<span class="qm-start" data-est-id="${esc(id)}" style="color:#9a9a9a;"></span> · <span class="qm-load-workflow" data-index="${i}" style="color:#7b9cfa;cursor:pointer;text-decoration:underline;text-decoration-style:dotted;" title="Load this workflow onto canvas">${shortId(id)}</span></span></span>
                     ${nameHtml(workflowName(item))}
                 </span>
             </span>

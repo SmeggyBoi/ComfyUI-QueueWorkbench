@@ -78,6 +78,9 @@ def _init_db():
             )
         """)
         _migrate_history(conn)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS history_estimates ON history(workflow, workflow_id, sig, status, duration_ms)"
+        )
         # Anything still marked live/held when we boot was orphaned by the last
         # shutdown — promote it to the restorable backlog.
         cur = conn.execute(
@@ -248,11 +251,19 @@ def run_duration_ms(status):
     return int(end - start)
 
 
+_UNSAVED_NAME_RE = re.compile(r"^Unsaved Workflow( \(\d+\))?$")
+
+
 def run_workflow(extra_data):
-    """(workflow name without .json, GUI workflow id) of a run's extra_data; None where unknown."""
+    """(workflow name without .json, GUI workflow id) of a run's extra_data; None where unknown.
+    The GUI's placeholder tab name for an unsaved workflow counts as no name — otherwise it would
+    pool every unrelated unsaved workflow under the same key and split a saved workflow's history
+    from its re-run-from-output copy (same GUI id, placeholder name)."""
     workflow = _dict(_dict(_dict(extra_data).get("extra_pnginfo")).get("workflow"))
     name = _dict(workflow.get("extra")).get("qm_name")
     name = name.removesuffix(".json") if isinstance(name, str) else None
+    if name and _UNSAVED_NAME_RE.match(name):
+        name = None
     workflow_id = workflow.get("id")
     return (name or None), (str(workflow_id) if workflow_id else None)
 
@@ -269,24 +280,28 @@ def history_columns(entry):
 
 
 def _migrate_history(conn):
-    """Give a history table from before the derived columns those columns, filled in from each
-    run's stored entry. A row whose entry can't be read keeps NULLs."""
+    """Give a history table from before the derived columns those columns, and back-fill every
+    row still missing them (WHERE sig IS NULL — a parsed entry always gets a string signature,
+    "" at minimum). Runs on every start, not just when the ALTER just added the columns: the
+    ALTER autocommits immediately, so a crash between it and the one-time backfill used to leave
+    those rows NULL for good. A row whose entry can't be read keeps NULLs and is retried next start."""
     present = {row[1] for row in conn.execute("PRAGMA table_info(history)")}
     missing = [(name, kind) for name, kind in HISTORY_COLUMNS if name not in present]
-    if not missing:
-        return
     for name, kind in missing:
         conn.execute(f"ALTER TABLE history ADD COLUMN {name} {kind}")
     assignments = ", ".join(f"{name}=?" for name, _ in HISTORY_COLUMNS)
-    rows = conn.execute("SELECT id, entry_json FROM history").fetchall()
+    rows = conn.execute("SELECT id, entry_json FROM history WHERE sig IS NULL").fetchall()
+    filled = 0
     for row_id, entry_json in rows:
         try:
             columns = history_columns(json.loads(entry_json))
         except ValueError:
             continue
         conn.execute(f"UPDATE history SET {assignments} WHERE id=?", (*columns, row_id))
-    print(f"[QueueWorkbench] history: added {', '.join(name for name, _ in missing)} "
-          f"for {len(rows)} finished run(s)")
+        filled += 1
+    if filled:
+        print(f"[QueueWorkbench] history: backfilled {', '.join(name for name, _ in HISTORY_COLUMNS)} "
+              f"for {len(rows)} finished run(s)")
 
 
 def _list_row(entry):
