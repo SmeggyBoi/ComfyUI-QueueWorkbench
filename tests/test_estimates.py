@@ -220,12 +220,11 @@ class ProgressCaptureTest(unittest.TestCase):
         on("executing", {"node": "459:451", "display_node": "459", "prompt_id": "a"})
         self.assertEqual(estimates.running_state()["node"], "459:451")
         self.assertIsNone(estimates.running_state()["value"], "a new node starts without progress")
-        on("progress", {"value": 1, "max": 2, "prompt_id": "other", "node": "9"})
         on("status", {"status": {"exec_info": {"queue_remaining": 1}}})
         on(1, b"\xff\xd8 preview bytes")
         self.assertEqual(estimates.running_state()["node"], "459:451")
         on("execution_success", {"prompt_id": "a", "timestamp": START + 5_000})
-        self.assertIsNone(estimates.running_state())
+        self.assertIsNone(estimates.running_state(), "execution_success clears a matching run")
 
     def test_every_end_of_a_run_clears_it(self):
         for event, data in [("execution_error", {"prompt_id": "a"}), ("execution_interrupted", {"prompt_id": "a"}),
@@ -234,14 +233,24 @@ class ProgressCaptureTest(unittest.TestCase):
             estimates.on_event(event, data)
             self.assertIsNone(estimates.running_state(), event)
 
-    def test_a_run_queued_without_a_client_starts_at_its_first_node(self):
-        # ComfyUI sends execution_start/success only for runs with a client_id; executing goes to everyone
-        estimates.on_event("execution_start", {"prompt_id": "old", "timestamp": START - 50_000})
-        estimates.on_event("executing", {"node": "3", "prompt_id": "script"})
+    def test_a_script_queued_run_starts_at_its_first_progress_event(self):
+        # ComfyUI sends progress_state for script-queued runs (no execution_start/executing/success)
+        estimates.on_event("progress_state", {"prompt_id": "s", "nodes": {"3": {"state": "running", "node_id": "3", "value": 0, "max": 1}}})
         self.assertEqual(estimates.running_state(),
-                         {"prompt_id": "script", "started_at": START + 999, "node": "3", "value": None, "max": None})
-        estimates.on_event("execution_success", {"prompt_id": "old"})
-        self.assertEqual(estimates.running_state()["prompt_id"], "script", "an older run's end leaves it alone")
+                         {"prompt_id": "s", "started_at": START + 999, "node": "3", "value": 0, "max": 1})
+        estimates.on_event("progress", {"prompt_id": "s", "node": "3", "value": 5, "max": 20})
+        self.assertEqual(estimates.running_state(),
+                         {"prompt_id": "s", "started_at": START + 999, "node": "3", "value": 5, "max": 20})
+        estimates.on_event("execution_success", {"prompt_id": "u"})
+        self.assertEqual(estimates.running_state()["prompt_id"], "s", "an older run's end leaves it alone")
+
+    def test_ui_run_with_execution_start_and_progress_state(self):
+        # UI runs send execution_start (with timestamp), then progress_state updates
+        estimates.on_event("execution_start", {"prompt_id": "ui", "timestamp": START})
+        self.assertEqual(estimates.running_state()["started_at"], START)
+        estimates.on_event("progress_state", {"prompt_id": "ui", "nodes": {"7": {"state": "running", "node_id": "7", "value": 2, "max": 5}}})
+        self.assertEqual(estimates.running_state(),
+                         {"prompt_id": "ui", "started_at": START, "node": "7", "value": 2, "max": 5})
 
     def test_the_state_handed_out_is_a_copy(self):
         estimates.on_event("execution_start", {"prompt_id": "a", "timestamp": START})

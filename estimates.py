@@ -18,7 +18,7 @@ from aiohttp import web
 from . import persistence
 
 RECENT_RUNS = 5   # an estimate is the median of a workflow's newest successful runs, at most this many
-_EVENTS = {"execution_start", "executing", "progress", "execution_success", "execution_error", "execution_interrupted"}
+_EVENTS = {"execution_start", "executing", "progress", "progress_state", "execution_success", "execution_error", "execution_interrupted"}
 _NO_ESTIMATE = {"estimate_ms": None, "basis": None, "runs": 0}
 
 _lock = threading.Lock()
@@ -34,7 +34,9 @@ def _state(prompt_id, started_at):
 
 
 def on_event(event, data):
-    """Follow the running run through the events ComfyUI sends (called for every event)."""
+    """Follow the running run through the events ComfyUI sends (called for every event).
+    Captures progress from execution_start/executing/progress (UI runs) and progress_state/progress
+    (script-queued runs, which never get execution_start/executing/error from ComfyUI)."""
     global _running
     if event not in _EVENTS or not isinstance(data, dict):
         return
@@ -43,13 +45,28 @@ def on_event(event, data):
         mine = _running is not None and _running["prompt_id"] == prompt_id
         if event == "execution_start":
             _running = _state(prompt_id, data.get("timestamp") or _now_ms())
+        elif event in ("progress", "progress_state"):
+            # Start a capture for a new or unknown prompt_id (script-queued runs have no execution_start)
+            if not mine:
+                _running = _state(prompt_id, _now_ms())
+            # Apply the event
+            if event == "progress_state":
+                # progress_state lists all nodes; find the first one with state == "running"
+                nodes = data.get("nodes", {})
+                for node_id, node_data in nodes.items():
+                    if isinstance(node_data, dict) and node_data.get("state") == "running":
+                        _running.update(
+                            node=node_data.get("node_id", node_id),
+                            value=node_data.get("value"),
+                            max=node_data.get("max")
+                        )
+                        break
+            else:  # progress
+                _running.update(node=data.get("node"), value=data.get("value"), max=data.get("max"))
         elif event == "executing" and data.get("node") is not None:
-            if not mine:   # queued without a client_id: ComfyUI sent no execution_start for it
+            if not mine:   # older run: ComfyUI sent no execution_start for it
                 _running = _state(prompt_id, _now_ms())
             _running.update(node=data["node"], value=None, max=None)
-        elif event == "progress":
-            if mine:
-                _running.update(node=data.get("node"), value=data.get("value"), max=data.get("max"))
         elif mine:   # the run's end, or executing with node None after it
             _running = None
 
