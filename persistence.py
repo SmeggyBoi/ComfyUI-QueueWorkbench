@@ -25,6 +25,7 @@ Finished runs are also kept (table `history`, newest HISTORY_LIMIT) for the
 panel's History tab, since ComfyUI's own history is RAM-only as well.
 """
 import os
+import re
 import json
 import time
 import sqlite3
@@ -65,12 +66,18 @@ def _init_db():
         """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS history (
-                id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                prompt_id  TEXT UNIQUE NOT NULL,
-                run_json   TEXT NOT NULL,
-                entry_json TEXT NOT NULL
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                prompt_id   TEXT UNIQUE NOT NULL,
+                run_json    TEXT NOT NULL,
+                entry_json  TEXT NOT NULL,
+                workflow    TEXT,
+                workflow_id TEXT,
+                status      TEXT,
+                sig         TEXT,
+                duration_ms INTEGER
             )
         """)
+        _migrate_history(conn)
         # Anything still marked live/held when we boot was orphaned by the last
         # shutdown — promote it to the restorable backlog.
         cur = conn.execute(
@@ -171,6 +178,116 @@ def _install_queue_hooks(prompt_queue):
 # ---------------------------------------------------------------------------
 HISTORY_LIMIT = 200
 
+# Derived columns, filled from each run's entry: what the time estimates (estimates.py)
+# and history filters query without parsing every stored entry. NULL where a run doesn't say.
+HISTORY_COLUMNS = (("workflow", "TEXT"), ("workflow_id", "TEXT"), ("status", "TEXT"),
+                   ("sig", "TEXT"), ("duration_ms", "INTEGER"))
+
+# Inputs that change how long a run takes. Primitive nodes carry the input's name in their
+# title, read like the panel's setting chips do: "Float (duration, seconds)" -> "duration"
+TIME_INPUT_RE = re.compile(r"^(steps|frames|num_frames|frame_count|length|video_length|duration|seconds"
+                           r"|width|height|fps|frame_rate|batch_size)$")
+_PRIMITIVE_TITLE_RE = re.compile(r"^\w+\s*\(([^,)]*).*\)$", re.ASCII)
+_END_EVENTS = ("execution_success", "execution_error", "execution_interrupted")
+
+
+def _dict(value):
+    return value if isinstance(value, dict) else {}
+
+
+def _number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def time_signature(prompt):
+    """Sorted "name=value" pairs of a prompt's numeric time-relevant inputs, joined with "|".
+    Two runs of a workflow with the same signature should take about as long."""
+    pairs = []
+    for node in _dict(prompt).values():
+        node = _dict(node)
+        for key, value in _dict(node.get("inputs")).items():
+            if not _number(value):
+                continue
+            name = key
+            if key == "value":
+                title = _dict(node.get("_meta")).get("title") or node.get("class_type") or ""
+                name = _PRIMITIVE_TITLE_RE.sub(r"\1", str(title))
+            name = name.lower()
+            if TIME_INPUT_RE.fullmatch(name):
+                pairs.append(f"{name}={value:g}")
+    return "|".join(sorted(pairs))
+
+
+def _first_messages(status):
+    """event -> data of the first status message of each event type."""
+    messages = _dict(status).get("messages")
+    found = {}
+    for message in messages if isinstance(messages, (list, tuple)) else []:
+        if isinstance(message, (list, tuple)) and len(message) == 2 and isinstance(message[0], str):
+            found.setdefault(message[0], _dict(message[1]))
+    return found
+
+
+def run_status(status):
+    """success / error / interrupted, the panel's runResult rule: ComfyUI reports an interrupt
+    as status_str "error" with an execution_interrupted message. None without a status."""
+    if not isinstance(status, dict):
+        return None
+    if status.get("status_str") == "success":
+        return "success"
+    return "interrupted" if "execution_interrupted" in _first_messages(status) else "error"
+
+
+def run_duration_ms(status):
+    """execution_start to the run's end message, from their timestamps; None if one is missing."""
+    found = _first_messages(status)
+    start = found.get("execution_start", {}).get("timestamp")
+    end = next((found[event].get("timestamp") for event in _END_EVENTS if event in found), None)
+    if not (_number(start) and _number(end)) or end < start:
+        return None
+    return int(end - start)
+
+
+def run_workflow(extra_data):
+    """(workflow name without .json, GUI workflow id) of a run's extra_data; None where unknown."""
+    workflow = _dict(_dict(_dict(extra_data).get("extra_pnginfo")).get("workflow"))
+    name = _dict(workflow.get("extra")).get("qm_name")
+    name = name.removesuffix(".json") if isinstance(name, str) else None
+    workflow_id = workflow.get("id")
+    return (name or None), (str(workflow_id) if workflow_id else None)
+
+
+def history_columns(entry):
+    """The HISTORY_COLUMNS values of a history entry: (workflow, workflow_id, status, sig, duration_ms)."""
+    entry = _dict(entry)
+    prompt = entry.get("prompt")
+    prompt = prompt if isinstance(prompt, (list, tuple)) else []
+    graph = prompt[2] if len(prompt) > 2 else None
+    extra_data = prompt[3] if len(prompt) > 3 else None
+    status = entry.get("status")
+    return (*run_workflow(extra_data), run_status(status), time_signature(graph), run_duration_ms(status))
+
+
+def _migrate_history(conn):
+    """Give a history table from before the derived columns those columns, filled in from each
+    run's stored entry. A row whose entry can't be read keeps NULLs."""
+    present = {row[1] for row in conn.execute("PRAGMA table_info(history)")}
+    missing = [(name, kind) for name, kind in HISTORY_COLUMNS if name not in present]
+    if not missing:
+        return
+    for name, kind in missing:
+        conn.execute(f"ALTER TABLE history ADD COLUMN {name} {kind}")
+    assignments = ", ".join(f"{name}=?" for name, _ in HISTORY_COLUMNS)
+    rows = conn.execute("SELECT id, entry_json FROM history").fetchall()
+    for row_id, entry_json in rows:
+        try:
+            columns = history_columns(json.loads(entry_json))
+        except ValueError:
+            continue
+        conn.execute(f"UPDATE history SET {assignments} WHERE id=?", (*columns, row_id))
+    print(f"[QueueWorkbench] history: added {', '.join(name for name, _ in missing)} "
+          f"for {len(rows)} finished run(s)")
+
 
 def _list_row(entry):
     """The entry with its GUI workflow cut down to the id and extra stamps the panel rows
@@ -209,8 +326,9 @@ def record_history(entry):
     entry_json = json.dumps(full)
     with _db_lock, _connect() as conn:
         conn.execute(
-            "INSERT OR REPLACE INTO history (prompt_id, run_json, entry_json) VALUES (?,?,?)",
-            (entry["prompt"][1], run_json, entry_json),
+            "INSERT OR REPLACE INTO history (prompt_id, run_json, entry_json, workflow, workflow_id, status, sig, "
+            "duration_ms) VALUES (?,?,?,?,?,?,?,?)",
+            (entry["prompt"][1], run_json, entry_json, *history_columns(cleaned)),
         )
         conn.execute(
             "DELETE FROM history WHERE id NOT IN "
@@ -259,6 +377,28 @@ def has_held():
     """True while the panel holds paused runs, i.e. the queue is paused."""
     with _db_lock, _connect() as conn:
         return conn.execute("SELECT 1 FROM saved_jobs WHERE origin='held' LIMIT 1").fetchone() is not None
+
+
+def recent_durations(workflow, workflow_id, sig=None, limit=5):
+    """duration_ms of a workflow's newest `limit` successful runs, newest first. Matched by name
+    when the run has one, else by GUI workflow id among the unnamed runs; with `sig`, only runs
+    with that time signature. [] without a name or id."""
+    if workflow:
+        where, args = "workflow = ?", [workflow]
+    elif workflow_id:
+        where, args = "workflow IS NULL AND workflow_id = ?", [workflow_id]
+    else:
+        return []
+    if sig is not None:
+        where += " AND sig = ?"
+        args.append(sig)
+    with _db_lock, _connect() as conn:
+        rows = conn.execute(
+            f"SELECT duration_ms FROM history WHERE status = 'success' AND duration_ms IS NOT NULL AND {where} "
+            f"ORDER BY id DESC LIMIT ?",
+            (*args, limit),
+        ).fetchall()
+    return [duration_ms for (duration_ms,) in rows]
 
 
 def _record_finished(prompt_queue, prompt_id):
