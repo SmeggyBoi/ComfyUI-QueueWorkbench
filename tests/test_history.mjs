@@ -243,6 +243,27 @@ test("⭐ takes the server's answer; a run gone from the history leaves the list
     assert.deepEqual(historyState().historyRuns.map(r => r.item[1]), ["a"]);
 });
 
+test("two pin clicks before the first answer: only one POST; after it resolves, the next togglePin sends the opposite value", async () => {
+    const run = { id: 1, item: histItem("z", "Wf"), outputs: OUT, status: status("success"), pinned: false };
+    const sent = [];
+    let resolveGate;
+    const gate = new Promise(resolve => { resolveGate = resolve; });
+    api.fetchApi = async (url, init) => {
+        sent.push([url, JSON.parse(init.body)]);
+        await gate;
+        return answer({ pinned: true });
+    };
+    const first  = togglePin(run);
+    const second = togglePin(run);
+    assert.equal(sent.length, 1, "the second click while the first is out sends nothing");
+    resolveGate();
+    await Promise.all([first, second]);
+    assert.equal(run.pinned, true);
+    api.fetchApi = async (url, init) => { sent.push([url, JSON.parse(init.body)]); return answer({ pinned: false }); };
+    await togglePin(run);
+    assert.deepEqual(sent[1], ["/queue_workbench/history/pin", { prompt_id: "z", pinned: false }]);
+});
+
 let failed = 0;
 for (const [name, fn] of tests) {
     try { await fn(); console.log(`ok   ${name}`); } catch (e) { failed++; console.log(`FAIL ${name}\n     ${e.message}`); }

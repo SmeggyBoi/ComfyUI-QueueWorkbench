@@ -1907,6 +1907,7 @@ let historyOldestId = null;
 let historyBusy     = false;
 let historyMoreBusy = false;
 let varyBusy        = false; // true while a ×N series is posting, so overlapping clicks don't stack
+let pinBusy         = false; // true while a pin/unpin is posting, so a double click doesn't send it twice
 let lastHistoryKey  = null;
 let historyFilter   = { status: "", workflow: null, q: "" };   // workflow: null = all, "" = the unnamed runs
 let historyWorkflows   = [];    // [{ name, count }] for the workflow filter
@@ -2090,19 +2091,25 @@ async function deleteHistoryRun(run) {
 
 // ⭐ on a history row: a pinned run is never trimmed. A run removed meanwhile leaves the list.
 async function togglePin(run) {
-    const res = await api.fetchApi("/queue_workbench/history/pin", {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt_id: run.item[1], pinned: !run.pinned }),
-    });
-    if (res.status === 404) {
-        toast("error", "This run is no longer in the history");
-        if (cardItemId === run.item[1]) hideDetailCard();
-        historyRuns = historyRuns.filter(r => r !== run);
-    } else if (res.ok) {
-        run.pinned = (await res.json()).pinned;
-    } else {
-        toast("error", run.pinned ? "Couldn't unpin the run" : "Couldn't pin the run");
+    if (pinBusy) return;
+    pinBusy = true;
+    try {
+        const res = await api.fetchApi("/queue_workbench/history/pin", {
+            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt_id: run.item[1], pinned: !run.pinned }),
+        });
+        if (res.status === 404) {
+            toast("error", "This run is no longer in the history");
+            if (cardItemId === run.item[1]) hideDetailCard();
+            historyRuns = historyRuns.filter(r => r !== run);
+        } else if (res.ok) {
+            run.pinned = (await res.json()).pinned;
+        } else {
+            toast("error", run.pinned ? "Couldn't unpin the run" : "Couldn't pin the run");
+        }
+        renderHistory();
+    } finally {
+        pinBusy = false;
     }
-    renderHistory();
 }
 
 function renderHistory() {
