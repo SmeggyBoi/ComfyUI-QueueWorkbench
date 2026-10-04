@@ -5,11 +5,13 @@ import fs from "node:fs";
 const src = fs.readFileSync(new URL("../web/queue_workbench.js", import.meta.url), "utf8").replace(/^import .*$/mg, "");
 globalThis.window   = { matchMedia: () => ({ matches: true }) };
 globalThis.document = { getElementById: () => null };
-const api = { addEventListener() {} };   // the History tests below set api.fetchApi
+const historyListeners = {};   // event name -> the module's handler, for the finish-event tests below
+const api = { addEventListener(event, fn) { historyListeners[event] = fn; } };   // the History tests below set api.fetchApi
 const { runResult, fmtDuration, finishedInfo, outputMedia, requeueBody, mergeNewRuns, historyRowHtml, detailHtml, groupInfo, historyQuery, workflowOptionsHtml,
-        refreshHistory, setHistoryFilter, clearHistoryFilter, togglePin, historyState } = new Function("app", "api",
+        refreshHistory, refreshHistoryWorkflows, setHistoryFilter, clearHistoryFilter, togglePin, historyState, setPanel } = new Function("app", "api",
     src + "\nreturn { runResult, fmtDuration, finishedInfo, outputMedia, requeueBody, mergeNewRuns, historyRowHtml, detailHtml, groupInfo, historyQuery, workflowOptionsHtml,"
-        + " refreshHistory, setHistoryFilter, clearHistoryFilter, togglePin, historyState: () => ({ historyRuns, historyNewestId }) };")({ registerExtension() {} }, api);
+        + " refreshHistory, refreshHistoryWorkflows, setHistoryFilter, clearHistoryFilter, togglePin, historyState: () => ({ historyRuns, historyNewestId }),"
+        + " setPanel: (open, tab) => { panelOpen = open; activeTab = tab; } };")({ registerExtension() {} }, api);
 
 const tests = [];
 const test = (name, fn) => tests.push([name, fn]);
@@ -262,6 +264,72 @@ test("two pin clicks before the first answer: only one POST; after it resolves, 
     api.fetchApi = async (url, init) => { sent.push([url, JSON.parse(init.body)]); return answer({ pinned: false }); };
     await togglePin(run);
     assert.deepEqual(sent[1], ["/queue_workbench/history/pin", { prompt_id: "z", pinned: false }]);
+});
+
+test("pinning one run while another's request is still out: both send, the busy flag is per-run", async () => {
+    const a = { id: 1, item: histItem("a", "Wf"), outputs: OUT, status: status("success"), pinned: false };
+    const b = { id: 2, item: histItem("b", "Wf"), outputs: OUT, status: status("success"), pinned: false };
+    const sent = [];
+    let resolveGate;
+    const gate = new Promise(resolve => { resolveGate = resolve; });
+    api.fetchApi = async (url, init) => {
+        sent.push([url, JSON.parse(init.body)]);
+        await gate;
+        return answer({ pinned: true });
+    };
+    const first  = togglePin(a);
+    const second = togglePin(b);
+    assert.equal(sent.length, 2, "a different row while the first is out still sends its own POST");
+    resolveGate();
+    await Promise.all([first, second]);
+    assert.equal(a.pinned, true);
+    assert.equal(b.pinned, true);
+});
+
+test("the workflow filter select keeps its current options when a refresh changes nothing", async () => {
+    let assigns = 0;
+    const select = { _html: "", get innerHTML() { return this._html; }, set innerHTML(v) { assigns++; this._html = v; } };
+    document.getElementById = id => (id === "qm-filter-workflow" ? select : null);
+    try {
+        api.fetchApi = async () => answer({ workflows: [{ name: "Wf", count: 1 }] });
+        await refreshHistoryWorkflows();
+        assert.equal(assigns, 1);
+        await refreshHistoryWorkflows();
+        assert.equal(assigns, 1, "same options: the select is left alone so an open dropdown doesn't reshuffle");
+        api.fetchApi = async () => answer({ workflows: [{ name: "Wf", count: 2 }] });
+        await refreshHistoryWorkflows();
+        assert.equal(assigns, 2, "the run count changed: reassigned");
+    } finally {
+        document.getElementById = () => null;
+    }
+});
+
+test("a run finishing refreshes the workflow list from the execution event, only while History is the visible tab", async () => {
+    const calls = [];
+    api.fetchApi = async url => { calls.push(url); return answer({ workflows: [] }); };
+    const refreshed = () => calls.includes("/queue_workbench/history/workflows");
+    setPanel(false, "history");
+    historyListeners.execution_success();   // also posts preview/clear regardless of the tab
+    await settle();
+    assert.equal(refreshed(), false, "panel closed: no refresh");
+    calls.length = 0;
+    setPanel(true, "queue");
+    historyListeners.execution_interrupted();
+    await settle();
+    assert.equal(refreshed(), false, "queue tab visible: no refresh");
+    calls.length = 0;
+    setPanel(true, "history");
+    historyListeners.execution_success();
+    await settle();
+    assert.equal(refreshed(), true);
+    calls.length = 0;
+    historyListeners.execution_interrupted();
+    await settle();
+    assert.equal(refreshed(), true);
+    calls.length = 0;
+    historyListeners.execution_error();
+    await settle();
+    assert.equal(refreshed(), true);
 });
 
 let failed = 0;

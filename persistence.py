@@ -661,8 +661,10 @@ def _register_routes(server):
             body = await request.json()
         except Exception:
             body = {}
-        pinned = bool(body.get("pinned"))
-        if not set_pinned(body.get("prompt_id"), pinned):
+        if not isinstance(body, dict) or not isinstance(body.get("prompt_id"), str):
+            return web.json_response({"error": "prompt_id must be a string"}, status=400)
+        pinned = body.get("pinned") is True
+        if not set_pinned(body["prompt_id"], pinned):
             return web.json_response({"error": "not in history"}, status=404)
         return web.json_response({"pinned": pinned})
 

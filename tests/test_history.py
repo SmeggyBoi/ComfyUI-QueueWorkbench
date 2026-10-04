@@ -262,10 +262,25 @@ class HistoryFilterTest(DbTest):
         with contextlib.closing(sqlite3.connect(persistence._DB_PATH)) as conn:
             self.assertEqual([row[2] for row in conn.execute("PRAGMA index_info(history_filters)")],
                              ["status", "workflow", "search"])
-            plan = conn.execute(
-                "EXPLAIN QUERY PLAN SELECT id, run_json, pinned FROM history WHERE id IN (SELECT id FROM history "
-                "INDEXED BY history_filters WHERE id < ? AND status = ? AND workflow = ? AND search LIKE ? ESCAPE '\\' "
-                "ORDER BY id DESC LIMIT ?) ORDER BY id DESC", (9, "error", "Wf", "%cat%", 51)).fetchall()
+        # Capture the SQL list_history actually runs (not a hand-copied string that could drift
+        # from it) by tracing a connection and asking SQLite for that exact statement's plan.
+        captured = []
+        orig_connect = persistence._connect
+
+        def traced_connect():
+            conn = orig_connect()
+            conn.set_trace_callback(captured.append)
+            return conn
+
+        persistence._connect = traced_connect
+        try:
+            persistence.list_history(limit=50, before=9, status="error", workflow="Wf", q="cat")
+        finally:
+            persistence._connect = orig_connect
+        select = next(sql for sql in captured if sql.strip().upper().startswith("SELECT"))
+        self.assertIn("INDEXED BY history_filters", select)
+        with contextlib.closing(sqlite3.connect(persistence._DB_PATH)) as conn:
+            plan = conn.execute(f"EXPLAIN QUERY PLAN {select}").fetchall()
         detail = " ".join(row[3] for row in plan)
         self.assertIn("USING COVERING INDEX history_filters", detail)
         self.assertIn("USING INTEGER PRIMARY KEY", detail)
@@ -429,6 +444,16 @@ class HistoryRoutesTest(DbTest, unittest.IsolatedAsyncioTestCase):
         self.assertEqual([r["pinned"] for r in (await (await listed("")).json())["runs"]], [False, False, True])
         res = await self.client.post("/queue_workbench/history/pin", json={"prompt_id": "gone", "pinned": True})
         self.assertEqual(res.status, 404)
+
+    async def test_pin_route_rejects_a_malformed_body_instead_of_500ing(self):
+        persistence.record_history(run("a"))
+        res = await self.client.post("/queue_workbench/history/pin", json=[])
+        self.assertEqual(res.status, 400)
+        res = await self.client.post("/queue_workbench/history/pin", json={"prompt_id": ["x"]})
+        self.assertEqual(res.status, 400)
+        res = await self.client.post("/queue_workbench/history/pin", json={"prompt_id": "a", "pinned": "false"})
+        self.assertEqual(await res.json(), {"pinned": False}, '"false" is truthy in Python; only True pins')
+        self.assertEqual(persistence.list_history()[0][0]["pinned"], False)
 
     async def test_the_workflows_route_is_added_before_the_run_route(self):
         paths = [route.path for route in self.routes]

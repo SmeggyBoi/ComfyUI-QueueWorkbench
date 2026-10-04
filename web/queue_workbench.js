@@ -1907,7 +1907,6 @@ let historyOldestId = null;
 let historyBusy     = false;
 let historyMoreBusy = false;
 let varyBusy        = false; // true while a ×N series is posting, so overlapping clicks don't stack
-let pinBusy         = false; // true while a pin/unpin is posting, so a double click doesn't send it twice
 let lastHistoryKey  = null;
 let historyFilter   = { status: "", workflow: null, q: "" };   // workflow: null = all, "" = the unnamed runs
 let historyWorkflows   = [];    // [{ name, count }] for the workflow filter
@@ -2004,9 +2003,15 @@ async function refreshHistoryWorkflows() {
     renderWorkflowFilter();
 }
 
+let lastWorkflowFilterHTML = null; // skip the reassignment when nothing changed, so an open dropdown stays put
+
 function renderWorkflowFilter() {
     const select = document.getElementById("qm-filter-workflow");
-    if (select) select.innerHTML = workflowOptionsHtml(historyWorkflows, historyFilter.workflow);
+    if (!select) return;
+    const html = workflowOptionsHtml(historyWorkflows, historyFilter.workflow);
+    if (html === lastWorkflowFilterHTML) return;
+    lastWorkflowFilterHTML = html;
+    select.innerHTML = html;
 }
 
 async function fullHistoryItem(run) {
@@ -2090,9 +2095,10 @@ async function deleteHistoryRun(run) {
 }
 
 // ⭐ on a history row: a pinned run is never trimmed. A run removed meanwhile leaves the list.
+// The in-flight flag lives on the run itself, so a click on a different row isn't gated by it.
 async function togglePin(run) {
-    if (pinBusy) return;
-    pinBusy = true;
+    if (run.pinBusy) return;
+    run.pinBusy = true;
     try {
         const res = await api.fetchApi("/queue_workbench/history/pin", {
             method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt_id: run.item[1], pinned: !run.pinned }),
@@ -2108,7 +2114,7 @@ async function togglePin(run) {
         }
         renderHistory();
     } finally {
-        pinBusy = false;
+        run.pinBusy = false;
     }
 }
 
@@ -2738,12 +2744,20 @@ api.addEventListener("execution_start", () => {
     startPreviewPolling();
 });
 
+// A finished run (success, error or interrupted) can be a brand-new workflow or just miss the
+// active History filter, so the filtered poll in refreshHistory() never sees it; refresh the
+// workflow select straight from the event instead of adding another poll.
+function historyMightHaveNewWorkflow() {
+    if (panelOpen && activeTab === "history") refreshHistoryWorkflows();
+}
+
 api.addEventListener("execution_success", () => {
     isGenerating = false;
     stopPreviewPolling();
     stopPollAnimation();
     setTimeout(() => { if (!isGenerating) stopAnimation(); }, 2000);
     api.fetchApi("/queue_workbench/preview/clear", { method: "POST" }).catch(() => {});
+    historyMightHaveNewWorkflow();
 });
 
 api.addEventListener("execution_interrupted", () => {
@@ -2751,7 +2765,10 @@ api.addEventListener("execution_interrupted", () => {
     stopPreviewPolling();
     stopPollAnimation();
     stopAnimation();
+    historyMightHaveNewWorkflow();
 });
+
+api.addEventListener("execution_error", historyMightHaveNewWorkflow);
 
 // ---------------------------------------------------------------------------
 // Fallback polling — polls server-side preview cache for non-submitting clients
