@@ -8,7 +8,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-const BUILD = "2026-10-03j";
+const BUILD = "2026-10-03k";
 
 // Stale-JS detection (PWA caches extension JS hard): compare this bundle's BUILD
 // against the stamp the backend reads from web/queue_workbench.js ON DISK.
@@ -350,11 +350,13 @@ function createPanel() {
             </select>
             <select id="qm-filter-workflow" title="Workflow" style="${FILTER}flex:1 1 120px;min-width:0;">${workflowOptionsHtml([], null)}</select>
             <input id="qm-filter-q" type="search" placeholder="Search prompts" style="${FILTER}flex:1 1 140px;min-width:0;">
+            <button id="qm-layout" title="Show as a grid of outputs" style="${FILTER}cursor:pointer;">▦</button>
         </div>
         <div id="qm-history"></div>
         <button id="qm-history-more" style="display:none;${BTN}width:100%;margin-top:6px;">Show more</button>`;
     historyView.querySelector("#qm-history-more").addEventListener("click", () =>
         loadMoreHistory().catch(e => console.warn("[QueueWorkbench] Failed to fetch history:", e)));
+    historyView.querySelector("#qm-layout").addEventListener("click", () => setHistoryLayout(historyLayout === "grid" ? "list" : "grid"));
     historyView.querySelector("#qm-filter-status").addEventListener("change", e => setHistoryFilter({ status: e.target.value }));
     historyView.querySelector("#qm-filter-workflow").addEventListener("change", e =>
         setHistoryFilter({ workflow: e.target.value === "" ? null : e.target.value.slice(1) }));
@@ -562,12 +564,16 @@ const MAX_THUMBS = 2; // max row thumbnails before the +N overflow indicator (de
 
 const esc = s => String(s).replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
 
-function thumbHtml(t, size, border) {
-    // Images shared by every run of the workflow fade; the ones that tell runs apart stay bright
-    const style = `width:${size}px;height:${size}px;object-fit:cover;border-radius:4px;flex-shrink:0;border:1px solid ${border};${t.shared ? "opacity:0.45;" : ""}`;
+// An image, or a video showing its first frame; a file that fails to load is hidden
+function mediaHtml(t, style) {
     return t.video
         ? `<video src="${t.url}#t=0.1" title="${esc(t.label)}" muted preload="metadata" style="${style}" onerror="this.style.display='none'"></video>`
         : `<img src="${t.url}" title="${esc(t.label)}" style="${style}" onerror="this.style.display='none'">`;
+}
+
+function thumbHtml(t, size, border) {
+    // Images shared by every run of the workflow fade; the ones that tell runs apart stay bright
+    return mediaHtml(t, `width:${size}px;height:${size}px;object-fit:cover;border-radius:4px;flex-shrink:0;border:1px solid ${border};${t.shared ? "opacity:0.45;" : ""}`);
 }
 
 function thumbsHtml(thumbs, size, border, bg) {
@@ -962,6 +968,23 @@ function historyRowHtml(run, info) {
             <button class="qm-history-delete" title="Remove from history" style="background:#5a1a1a;border:none;color:#f88;border-radius:4px;padding:2px 8px;cursor:pointer;font-size:11px;">✕</button>
         </span>
         ${chipsRowHtml(info.chips)}`;
+}
+
+// A gallery tile, inside the square cell renderHistory makes: the run's first output (or "No
+// output"), the status mark, ★ when pinned, +N for its other outputs, a faint red border if it failed
+function galleryTileHtml(run) {
+    const f      = finishedInfo(run);
+    const media  = outputMedia(run.outputs);
+    const failed = f.state === "error";
+    const badge  = (place, color, text) => `<span style="position:absolute;${place};background:#000b;color:${color};border-radius:3px;padding:0 4px;font-size:11px;line-height:16px;pointer-events:none;">${text}</span>`;
+    return `
+        <div title="${esc([workflowName(run.item) || "Unnamed workflow", f.label, f.text].filter(Boolean).join(" · "))}" style="position:absolute;inset:0;overflow:hidden;border-radius:5px;background:${failed ? "#2a1f1f" : "#242424"};border:1px solid ${failed ? "#6a2c2c" : "#3a3a3a"};">
+            ${media.length ? mediaHtml(media[0], "display:block;width:100%;height:100%;object-fit:cover;")
+                : `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#555;font-size:11px;">No output</div>`}
+        </div>
+        ${f.mark ? badge("top:4px;left:4px", f.color, f.mark) : ""}
+        ${run.pinned ? badge("top:4px;right:4px", PINNED_COLOR, "★") : ""}
+        ${media.length > 1 ? badge("bottom:4px;right:4px", "#ddd", `+${media.length - 1}`) : ""}`;
 }
 
 // where: "#3 of 22" / "Running" / "Saved" / "✓ Finished 14:32 · 3m 12s"; run (History tab)
@@ -1908,6 +1931,7 @@ let historyBusy     = false;
 let historyMoreBusy = false;
 let varyBusy        = false; // true while a ×N series is posting, so overlapping clicks don't stack
 let lastHistoryKey  = null;
+let historyLayout   = "list";   // "list" | "grid" (☰ / ▦), this session only
 let historyFilter   = { status: "", workflow: null, q: "" };   // workflow: null = all, "" = the unnamed runs
 let historyWorkflows   = [];    // [{ name, count }] for the workflow filter
 let historySearchTimer = null;
@@ -2118,12 +2142,21 @@ async function togglePin(run) {
     }
 }
 
+// ☰ / ▦ in the filter bar: the runs as rows or as a grid of output tiles
+function setHistoryLayout(layout) {
+    historyLayout = layout;
+    const toggle = document.getElementById("qm-layout");
+    toggle.textContent = layout === "grid" ? "☰" : "▦";
+    toggle.title       = layout === "grid" ? "Show as a list" : "Show as a grid of outputs";
+    renderHistory();
+}
+
 function renderHistory() {
     const list = document.getElementById("qm-history");
     const more = document.getElementById("qm-history-more");
     if (!list || !more) return;
     const key = JSON.stringify([historyRuns.map(r => [r.id, r.pinned]), historyMore, expandedId, Object.keys(workflowNames).length,
-        historyLoaded, historyError, historyFilter]);
+        historyLoaded, historyError, historyFilter, historyLayout]);
     if (key === lastHistoryKey) return;
     lastHistoryKey = key;
     more.style.display = historyMore ? "block" : "none";
@@ -2140,6 +2173,23 @@ function renderHistory() {
         return;
     }
     const info = groupInfo(historyRuns.map(r => r.item));
+    if (historyLayout === "grid") {
+        const grid = document.createElement("div");
+        grid.style.cssText = "display:grid;grid-template-columns:repeat(auto-fill,minmax(100px,1fr));gap:6px;margin-top:4px;";
+        for (const run of historyRuns) {
+            const f     = finishedInfo(run);
+            const items = viewerItems(run);
+            const el    = document.createElement("div");
+            el.style.cssText = `position:relative;aspect-ratio:1;cursor:${items.length ? "pointer" : "default"};`;
+            el.innerHTML = galleryTileHtml(run);
+            if (items.length) el.addEventListener("click", () => openViewer(items, 0));
+            // The detail card on hover; on touch screens a tap goes straight to the viewer
+            if (HOVER) attachDetail(el, run.item, info.get(run.item[1]), renderHistory, `${f.mark} ${f.label} ${f.text}`.trim(), run);
+            grid.appendChild(el);
+        }
+        list.appendChild(grid);
+        return;
+    }
     for (const run of historyRuns) {
         const id     = run.item[1];
         const f      = finishedInfo(run);
@@ -2178,6 +2228,165 @@ function renderHistory() {
         attachDetail(el, run.item, info.get(id), renderHistory, `${f.mark} ${f.label} ${f.text}`.trim(), run);
         list.appendChild(el);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Viewer — outputs full screen, above the panel and the detail card. Images fit the
+// screen; pinch or double-tap zooms, a drag pans the zoomed image. A swipe, ‹ › or
+// ← → step through the items; Esc, ✕ or a tap beside the image closes.
+// ---------------------------------------------------------------------------
+const MAX_ZOOM = 5;
+const TAP_ZOOM = 2.5;   // a double-tap / double-click switches between 1× and this
+
+// The zoom after a gesture: the image point that was under `from` lands under `to`, at the new
+// scale (kept within 1–MAX_ZOOM), panned no further than the zoomed image's edges allow.
+// view = { scale, x, y }; points are relative to the screen's centre, fit = the image's size
+// at 1×, box = the screen's size.
+function zoomView(view, from, to, scale, fit, box) {
+    const s   = Math.min(MAX_ZOOM, Math.max(1, scale));
+    const pan = (v, size, room) => {
+        const max = Math.max(0, (size * s - room) / 2);
+        return max ? Math.min(max, Math.max(-max, v)) : 0;
+    };
+    return { scale: s,
+             x: pan(to.x - (from.x - view.x) * s / view.scale, fit.w, box.w),
+             y: pan(to.y - (from.y - view.y) * s / view.scale, fit.h, box.h) };
+}
+
+// A History run's outputs for the viewer, captioned "<workflow> · ✓ · 14:32"
+function viewerItems(run) {
+    const f       = finishedInfo(run);
+    const caption = [workflowName(run.item) || "Unnamed workflow", f.mark, f.finishedAt && fmtTime(f.finishedAt)].filter(Boolean).join(" · ");
+    return outputMedia(run.outputs).map(m => ({ ...m, caption }));
+}
+
+// items: [{ url, label, video, caption }], starting at items[index]
+function openViewer(items, index) {
+    hideDetailCard();
+    const overlay = document.createElement("div");
+    overlay.style.cssText = "position:fixed;inset:0;z-index:10002;background:#000;display:flex;flex-direction:column;font:13px sans-serif;color:#ddd;";
+    const nav = side => `position:absolute;top:50%;${side}:8px;transform:translateY(-50%);background:#0009;border:none;color:#fff;font-size:30px;line-height:1;width:44px;height:64px;border-radius:6px;cursor:pointer;`;
+    overlay.innerHTML = `
+        <div class="qm-viewer-stage" style="flex:1;min-height:0;overflow:hidden;display:flex;align-items:center;justify-content:center;touch-action:none;user-select:none;"></div>
+        <button class="qm-viewer-prev" title="Previous (←)" style="${nav("left")}">‹</button>
+        <button class="qm-viewer-next" title="Next (→)" style="${nav("right")}">›</button>
+        <button class="qm-viewer-close" title="Close (Esc)" style="position:absolute;top:8px;right:8px;background:#0009;border:none;color:#fff;font-size:20px;width:40px;height:40px;border-radius:6px;cursor:pointer;">✕</button>
+        <div style="display:flex;align-items:center;gap:10px;padding:8px 16px;background:#111;">
+            <span class="qm-viewer-count" style="color:#888;flex-shrink:0;"></span>
+            <span class="qm-viewer-caption" style="flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"></span>
+            <a class="qm-viewer-download" style="max-width:45%;color:#7b9cfa;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"></a>
+        </div>`;
+    const stage    = overlay.querySelector(".qm-viewer-stage");
+    const prev     = overlay.querySelector(".qm-viewer-prev");
+    const next     = overlay.querySelector(".qm-viewer-next");
+    const download = overlay.querySelector(".qm-viewer-download");
+    const pointers = new Map();   // pointerId -> point, relative to the stage's centre
+    let view    = { scale: 1, x: 0, y: 0 };
+    let img     = null;           // the image shown; null for a video
+    let gesture = null;           // { view, start: pointerId -> point, moved, multi, target }, since a finger last went down or up
+    let lastTap = null;           // { time, at } of the last tap on the image, for a double-tap
+
+    const show = i => {
+        if (i < 0 || i >= items.length) return;
+        index = i;
+        const item = items[i];
+        stage.innerHTML = item.video
+            ? `<video src="${item.url}" controls autoplay loop muted playsinline style="max-width:100%;max-height:100%;"></video>`
+            : `<img src="${item.url}" alt="${esc(item.label)}" draggable="false" style="max-width:100%;max-height:100%;" onerror="this.style.display='none'">`;
+        img = item.video ? null : stage.querySelector("img");
+        view = { scale: 1, x: 0, y: 0 };
+        pointers.clear();
+        lastTap = null;
+        overlay.querySelector(".qm-viewer-count").textContent   = `${i + 1} / ${items.length}`;
+        overlay.querySelector(".qm-viewer-caption").textContent = item.caption;
+        download.href         = item.url;
+        download.download     = item.label;
+        download.textContent  = `⬇ ${item.label}`;
+        prev.style.visibility = i > 0 ? "visible" : "hidden";
+        next.style.visibility = i < items.length - 1 ? "visible" : "hidden";
+    };
+    // On window: the viewer opens over the compare view, which listens on document, and Esc must close only the viewer
+    const onKey = e => {
+        const step = { ArrowLeft: -1, ArrowRight: 1 }[e.key];
+        if (!step && e.key !== "Escape") return;
+        e.stopPropagation();
+        e.preventDefault();
+        if (step) show(index + step);
+        else close();
+    };
+    const close = () => {
+        overlay.remove();
+        window.removeEventListener("keydown", onKey, true);
+    };
+
+    const point = e => {
+        const r = stage.getBoundingClientRect();
+        return { x: e.clientX - r.left - r.width / 2, y: e.clientY - r.top - r.height / 2 };
+    };
+    const fit   = () => ({ w: img.offsetWidth, h: img.offsetHeight });
+    const box   = () => ({ w: stage.clientWidth, h: stage.clientHeight });
+    const apply = v => {
+        view = v;
+        img.style.transform = `translate(${v.x}px, ${v.y}px) scale(${v.scale})`;
+    };
+    // A tap beside the image closes; two quick taps on it zoom in, or back out
+    const tap = (target, at) => {
+        if (target === stage) return close();
+        if (target !== img) return;
+        const now = Date.now();
+        if (lastTap && now - lastTap.time < 300 && Math.hypot(at.x - lastTap.at.x, at.y - lastTap.at.y) < 30) {
+            lastTap = null;
+            apply(zoomView(view, at, at, view.scale > 1 ? 1 : TAP_ZOOM, fit(), box()));
+        } else {
+            lastTap = { time: now, at };
+        }
+    };
+    stage.addEventListener("pointerdown", e => {
+        if (e.target.tagName === "VIDEO") return;   // the video's own controls
+        stage.setPointerCapture(e.pointerId);
+        const first = pointers.size === 0;
+        pointers.set(e.pointerId, point(e));
+        gesture = { view, start: new Map(pointers), moved: !first && gesture.moved, multi: !first, target: first ? e.target : gesture.target };
+    });
+    stage.addEventListener("pointermove", e => {
+        if (!pointers.has(e.pointerId)) return;
+        pointers.set(e.pointerId, point(e));
+        const ids  = [...pointers.keys()];
+        const from = ids.map(id => gesture.start.get(id));
+        const to   = ids.map(id => pointers.get(id));
+        if (to.some((p, i) => Math.hypot(p.x - from[i].x, p.y - from[i].y) > 10)) gesture.moved = true;
+        if (!img) return;
+        if (to.length > 1) {   // pinch: zoom by how far the fingers spread, around their midpoint
+            const mid    = (a, b) => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
+            const spread = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+            apply(zoomView(gesture.view, mid(from[0], from[1]), mid(to[0], to[1]),
+                gesture.view.scale * spread(to[0], to[1]) / spread(from[0], from[1]), fit(), box()));
+        } else if (gesture.view.scale > 1) {
+            apply(zoomView(gesture.view, from[0], to[0], gesture.view.scale, fit(), box()));
+        }
+    });
+    const lift = e => {
+        if (!pointers.has(e.pointerId)) return;
+        const start = gesture.start.get(e.pointerId);
+        const end   = point(e);
+        pointers.delete(e.pointerId);
+        if (pointers.size) {   // one finger of a pinch lifted: the other carries on from here
+            gesture = { ...gesture, view, start: new Map(pointers) };
+            return;
+        }
+        if (e.type === "pointercancel") return;
+        const dx = end.x - start.x, dy = end.y - start.y;
+        if (!gesture.moved) tap(gesture.target, end);
+        else if (!gesture.multi && view.scale === 1 && Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy)) show(index + (dx < 0 ? 1 : -1));
+    };
+    stage.addEventListener("pointerup", lift);
+    stage.addEventListener("pointercancel", lift);
+    prev.addEventListener("click", () => show(index - 1));
+    next.addEventListener("click", () => show(index + 1));
+    overlay.querySelector(".qm-viewer-close").addEventListener("click", close);
+    window.addEventListener("keydown", onKey, true);
+    document.body.appendChild(overlay);
+    show(index);
 }
 
 // ---------------------------------------------------------------------------

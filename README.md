@@ -31,6 +31,10 @@ runs of the same workflow apart, and fix a queued run without re-queueing it.
   run, the error. Queue a run again with ⤴ (same settings, same seed) or remove it
   with ✕. Filter by status, workflow or text in the prompts; pin a run with ☆ to
   keep it beyond the 200. The history survives restarts.
+- **Gallery and viewer.** ▦ in the *History* tab shows the finished runs as a
+  grid, one tile per run with its first output (+N when it has more). A tile
+  opens its outputs full screen: swipe or use ‹ › / ← → between them, pinch or
+  double-tap to zoom, and download the file.
 - **Survives restarts.** Pending and paused runs are mirrored to a local SQLite
   file. After a restart or crash they show up as *Saved from previous session*,
   where you can restore or discard them. Nothing re-runs on its own.
@@ -81,6 +85,7 @@ red banner at the top tells you so.
 | Pause / resume | *Pause* in the panel header. The running job finishes; nothing else starts until you resume. |
 | Restore after a restart | *Saved from previous session* section: restore one or all, or discard |
 | See finished runs | *History* tab; *Show more* loads older ones |
+| See finished runs as a gallery | ▦ in the *History* tab's filter bar (☰ for the list again). Tap a tile to see its outputs full screen: swipe or ‹ › / ← → between them, pinch or double-tap to zoom, ⬇ to download, Esc or a tap beside the image to close. |
 | Run a finished run again | ⤴ on its history row (same seed) |
 | Run a finished run with new seeds | *🎲 New seed* in its detail card, or *🎲 ×* next to a number (1–20) for that many variations. They go to the end of the queue. |
 | Duplicate a queued run with new seeds | *⧉ ×* next to a number in a pending or running run's detail card |
@@ -198,6 +203,7 @@ is the ntfy notification, and only if you configure it. The persistence file
 node tests/test_edit_diff.mjs                 # frontend logic (Node 18+)
 node tests/test_history.mjs                   # history tab logic
 node tests/test_variations.mjs                # variations (new seeds)
+node tests/test_compare.mjs                   # gallery, viewer and compare
 python -m unittest discover -s tests -v       # backend logic (needs aiohttp)
 ```
 
