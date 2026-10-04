@@ -93,6 +93,25 @@ test("one subgraph seed feeding two nodes inside changes the instance once", () 
     assert.equal(changed, 2);
     assert.deepEqual([prompt["459:451"].inputs, prompt["459:452"].inputs], [{ seed: S2, cfg: 7 }, { noise_seed: S2 }]);
     assert.deepEqual(workflow.nodes[0].widgets_values, ["a prompt", S2, 7]);
+    assert.deepEqual(workflow.definitions.subgraphs[0].nodes[0].widgets_values, [0, "randomize", 8, 7], "inner node unchanged when seed is promoted");
+    assert.deepEqual(workflow.definitions.subgraphs[0].nodes[1].widgets_values, [0, "randomize"], "second inner node unchanged");
+});
+
+test("non-promoted seed lives in the inner node, not the instance", () => {
+    const item = run({
+        "459:451": { class_type: "KSampler", inputs: { seed: 8, cfg: 7 } },
+    }, {
+        id: "wf",
+        nodes: [{ id: 459, type: SG, widgets_values: ["a prompt", 25, 7] }],   // [prompt, something, cfg]—no seed
+        definitions: { subgraphs: [{ id: SG, nodes: [
+            { id: 451, type: "KSampler", widgets_values: [8, "fixed", 8, 7] },   // seed at position 0
+        ] }] },
+    });
+    const { prompt, workflow, changed } = rerollSeeds(item, seq(0.75));
+    assert.equal(changed, 1);
+    assert.equal(prompt["459:451"].inputs.seed, S3);
+    assert.deepEqual(workflow.nodes[0].widgets_values, ["a prompt", 25, 7], "instance unchanged");
+    assert.deepEqual(workflow.definitions.subgraphs[0].nodes[0].widgets_values, [S3, "fixed", 8, 7], "inner node seed changes");
 });
 
 test("object widgets_values (VHS style) are patched by value", () => {

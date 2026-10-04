@@ -842,19 +842,18 @@ function guiPath(nodes, nodeId) {
 
 // Swaps the first widget value strictly equal to old; widgets_values is an array or, on VHS
 // nodes, an object. Only the first: a small seed can equal a later widget of the same node
-// (KSampler [seed, control, steps, cfg, …] with seed 1 and cfg 1).
+// (KSampler [seed, control, steps, cfg, …] with seed 1 and cfg 1). Returns true if swapped.
 function swapWidgetValue(values, old, seed) {
-    if (!values || typeof values !== "object") return;
+    if (!values || typeof values !== "object") return false;
     const key = Object.keys(values).find(k => values[k] === old);
-    if (key !== undefined) values[key] = seed;
+    if (key !== undefined) { values[key] = seed; return true; }
+    return false;
 }
 
 // Copies of a run's graph and workflow with every seed re-rolled: one new value per distinct
 // old value, so seeds that matched still match; linked seeds ([id, slot]) change at their
-// source. The workflow follows so the outputs load with the seeds really used: each GUI node
-// on the API node's path takes each new seed once (a seed promoted to a subgraph input lives
-// on the instance node, the node inside keeps a stale copy); no GUI node, no change there.
-// changed = re-rolled inputs; workflow is null for a run without one.
+// source. Each seed stops at the first GUI node that holds it (instance if promoted, inner node
+// if not). changed = re-rolled inputs; workflow is null for a run without one.
 function rerollSeeds(item, random = Math.random) {
     const prompt   = structuredClone(item[2] || {});
     const workflow = structuredClone(item[3]?.extra_pnginfo?.workflow ?? null);
@@ -869,9 +868,11 @@ function rerollSeeds(item, random = Math.random) {
             node.inputs[input] = seed;
             changed++;
             for (const guiNode of guiPath(nodes, nodeId)) {
-                if (done.has(guiNode)) continue;
-                done.add(guiNode);
-                swapWidgetValue(guiNode.widgets_values, old, seed);
+                if (done.has(guiNode)) break;
+                if (swapWidgetValue(guiNode.widgets_values, old, seed)) {
+                    done.add(guiNode);
+                    break;
+                }
             }
         }
     }
