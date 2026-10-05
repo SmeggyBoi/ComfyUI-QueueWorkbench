@@ -38,8 +38,10 @@ globalThis.document = Object.assign(keyTarget(), {
 const toasts = [];
 const api = { addEventListener() {} };   // the History tests set api.fetchApi
 const app = { registerExtension() {}, extensionManager: { toast: { add: t => toasts.push(t) } } };
-const { galleryTileHtml, viewerItems, zoomView, openViewer, setHistoryLayout, setHistoryFilter, fmtTime, historyState } = new Function("app", "api",
-    src + "\nreturn { galleryTileHtml, viewerItems, zoomView, openViewer, setHistoryLayout, setHistoryFilter, fmtTime, historyState: () => ({ historyRuns }) };")(app, api);
+const { galleryTileHtml, viewerItems, zoomView, openViewer, setHistoryLayout, setHistoryFilter, fmtTime, historyState,
+        wordDiff, settingsDiff, compareHtml, previousRun, detailHtml, groupInfo, startComparePick, refreshHistory, deleteHistoryRun } = new Function("app", "api",
+    src + "\nreturn { galleryTileHtml, viewerItems, zoomView, openViewer, setHistoryLayout, setHistoryFilter, fmtTime, wordDiff, settingsDiff, compareHtml, previousRun,"
+        + " detailHtml, groupInfo, startComparePick, refreshHistory, deleteHistoryRun, historyState: () => ({ historyRuns, comparePick }) };")(app, api);
 
 const tests = [];
 const test = (name, fn) => tests.push([name, fn]);
@@ -153,6 +155,160 @@ test("▦ shows the runs as tiles and a tile opens its run's outputs in the view
     assert.equal(els["qm-layout"].textContent, "▦");
     assert.equal(list.children.length, 2);
     assert.ok(list.children[0].innerHTML.includes("qm-requeue-btn"), "rows again");
+});
+
+test("word diff: identical, an insertion, a deletion, a replacement in the middle", () => {
+    assert.deepEqual(wordDiff("a cat on a sofa", "a cat on a sofa"), [{ op: "same", text: "a cat on a sofa" }]);
+    assert.deepEqual(wordDiff("a cat on a sofa", "a black cat on a sofa"),
+        [{ op: "same", text: "a " }, { op: "add", text: "black " }, { op: "same", text: "cat on a sofa" }]);
+    assert.deepEqual(wordDiff("a black cat on a sofa", "a cat on a sofa"),
+        [{ op: "same", text: "a " }, { op: "del", text: "black " }, { op: "same", text: "cat on a sofa" }]);
+    assert.deepEqual(wordDiff("a cat on a red sofa at night", "a cat on a green sofa at night"),
+        [{ op: "same", text: "a cat on a " }, { op: "del", text: "red " }, { op: "add", text: "green " }, { op: "same", text: "sofa at night" }]);
+});
+
+test("word diff: changes at both ends, line breaks kept, an empty side", () => {
+    assert.deepEqual(wordDiff("one two three four", "zero two three five"), [
+        { op: "del", text: "one " }, { op: "add", text: "zero " }, { op: "same", text: "two three " }, { op: "del", text: "four" }, { op: "add", text: "five" }]);
+    assert.deepEqual(wordDiff("portrait,\nsoft light", "portrait,\nhard light"),
+        [{ op: "same", text: "portrait,\n" }, { op: "del", text: "soft " }, { op: "add", text: "hard " }, { op: "same", text: "light" }]);
+    assert.deepEqual(wordDiff("", "new text"), [{ op: "add", text: "new text" }]);
+    assert.deepEqual(wordDiff("old text", ""), [{ op: "del", text: "old text" }]);
+    assert.deepEqual(wordDiff("", ""), []);
+});
+
+test("word diff: a middle of more than 4 000 000 word pairs is one deletion and one addition", () => {
+    const words = (prefix, n) => Array.from({ length: n }, (_, i) => `${prefix}${i} `).join("");
+    // 2000 × 2000 words in the middle: the LCS still finds the shared word
+    assert.deepEqual(wordDiff(words("a", 1000) + "shared " + words("b", 999), words("c", 1000) + "shared " + words("d", 999)).map(p => p.op),
+        ["del", "add", "same", "del", "add"]);
+    // 2001 × 2001: past the limit, no LCS
+    const a = words("a", 1000) + "shared " + words("b", 1000), b = words("c", 1000) + "shared " + words("d", 1000);
+    assert.deepEqual(wordDiff(a, b), [{ op: "del", text: a }, { op: "add", text: b }]);
+});
+
+test("settings diff: per category what only A and only B have, the shared count, seeds that differ", () => {
+    const prompt = (steps, lora, seeds, extra = {}) => ({
+        "3": { class_type: "KSampler", inputs: { steps, cfg: 1, sampler_name: "euler", seed: seeds[0], ...extra } },
+        "5": { class_type: "LoraLoader", inputs: { lora_name: lora, strength_model: 0.8 } },
+        "6": { class_type: "EmptyLatentImage", inputs: { width: 1024, height: 1024, batch_size: 1 } },
+        "8": { class_type: "RandomNoise", inputs: { noise_seed: seeds[1] ?? 0 } },
+    });
+    const { rows, same } = settingsDiff(prompt(8, "detail.safetensors", [1, 7]), prompt(12, "style.safetensors", [2, 7], { denoise: 0.5 }));
+    assert.deepEqual(rows, [
+        { cat: "sampling", onlyA: ["Steps 8"], onlyB: ["Steps 12", "Denoise 0.5"] },
+        { cat: "lora", onlyA: ["detail · 0.8"], onlyB: ["style · 0.8"] },
+        { cat: "seeds", onlyA: ["1"], onlyB: ["2"] },
+    ], "the shared seed 7 is left out");
+    assert.equal(same, 4, "CFG 1, Sampler euler, 1024×1024, Batch size 1");
+    const p = prompt(8, "detail.safetensors", [1]);
+    assert.deepEqual(settingsDiff(p, p), { rows: [], same: 6 });
+    assert.deepEqual(settingsDiff({}, {}), { rows: [], same: 0 });
+});
+
+// API prompts with a sampler and prompt text (promptTexts takes text inputs of 30+ characters)
+const PROMPT = (text, { steps = 8, seed = 1 } = {}) => ({
+    "3": { class_type: "KSampler", _meta: { title: "KSampler" }, inputs: { steps, cfg: 1, sampler_name: "euler", seed } },
+    "6": { class_type: "CLIPTextEncode", _meta: { title: "Positive" }, inputs: { text, clip: ["4", 1] } },
+});
+const NEGATIVE = { "7": { class_type: "CLIPTextEncode", _meta: { title: "Negative" }, inputs: { text: "blurry, low quality, extra fingers", clip: ["4", 1] } } };
+
+test("compare view: headers, first outputs, the settings that differ and a word diff of the prompts, escaped", () => {
+    const older = run(1, "aaaa1111", { prompt: { ...PROMPT("a <b>bold</b> cat on a red sofa at night"), ...NEGATIVE } });
+    const newer = run(2, "bbbb2222", { prompt: PROMPT("a <b>bold</b> cat on a green sofa at night", { steps: 12, seed: 2 }), outputs: out("c.png") });
+    const html  = compareHtml(older, newer);
+    assert.ok(html.indexOf("aaaa1111…") < html.indexOf("bbbb2222…"));
+    assert.ok(html.includes("Older") && html.includes("Newer") && html.includes("3m 12s"));
+    assert.match(html, /data-side="0" data-index="0"[^>]*><img src="\/view\?filename=a\.png/);
+    assert.match(html, /data-side="1" data-index="0"[^>]*><img src="\/view\?filename=c\.png/);
+    assert.match(html, /data-side="0" data-index="1"[^>]*>\+1 more</);
+    assert.ok(!html.includes(`data-side="1" data-index="1"`), "one output: no +N more");
+    assert.ok(html.indexOf("Steps 8") < html.indexOf("→") && html.indexOf("→") < html.indexOf("Steps 12"));
+    assert.ok(html.includes("Seeds") && html.includes("2 settings identical"));
+    assert.ok(html.includes(`<del style="color:#f88;background:#ff666622;">red </del>`));
+    assert.ok(html.includes(`<ins style="color:#7e7;background:#66ff6622;text-decoration:none;">green </ins>`));
+    assert.ok(html.includes("a &#60;b&#62;bold&#60;/b&#62; cat") && !html.includes("<b>bold"));
+    assert.ok(html.includes("Negative — only in the older run") && html.includes("blurry, low quality"));
+    assert.ok(!html.includes("different workflows"));
+    const other = compareHtml(older, run(3, "cccc3333", { name: "Other", state: "error", outputs: {}, prompt: older.item[2] }));
+    assert.match(other, /<details[^>]*><summary[^>]*>Positive — identical<\/summary>/);
+    assert.match(other, /<summary[^>]*>Negative — identical<\/summary>/);
+    assert.ok(other.includes("different workflows") && other.includes("No output") && other.includes("✕"));
+    assert.ok(other.includes("None") && other.includes("3 settings identical"));
+});
+
+test("detail card of a finished run: ⇄ Compare…, and ⇄ vs previous once an older run of its workflow is loaded", async () => {
+    api.fetchApi = async url => answer(url.includes("/workflows") ? { workflows: [] }
+        : { runs: [listed(run(3, "cccc3333")), listed(run(2, "bbbb2222", { name: "Other" })), listed(run(1, "aaaa1111"))], more: false });
+    setHistoryFilter({});
+    await settle();
+    const [c, b, a] = historyState().historyRuns;
+    const card = (r, where = "✓ Finished") => detailHtml(r.item, groupInfo([r.item]).get(r.item[1]), where, where === "Running" ? null : r);
+    assert.ok(card(c).includes("⇄ Compare…") && card(c).includes("qm-compare-prev"), "a ran Wf before c");
+    assert.ok(!card(a).includes("qm-compare-prev"), "nothing of Wf before a");
+    assert.ok(!card(b).includes("qm-compare-prev"), "Other ran once");
+    assert.ok(!card(c, "Running").includes("qm-compare"), "not for queued runs");
+    assert.equal(previousRun(c, historyState().historyRuns), a);
+    const script = { ...run(5, "eeee5555"), item: [0, "eeee5555", {}, {}, []] };
+    assert.equal(previousRun(script, [script, { ...script, id: 4 }]), undefined, "no workflow identity, no previous");
+});
+
+test("pick mode: ⇄ Compare…, then a tap on another run compares them, older first; the same run or Esc cancels", () => {
+    els["qm-compare-pick"] = element();
+    const banner = els["qm-compare-pick"], list = els["qm-history"];
+    const [c, b, a] = historyState().historyRuns;
+    const tapRow = r => list.children[historyState().historyRuns.indexOf(r)].listeners.click[0]({ stopImmediatePropagation() {}, preventDefault() {} });
+    const before = body.length;
+    startComparePick(c);
+    assert.equal(banner.style.display, "flex");
+    assert.match(banner.innerHTML, /Tap a run to compare with Wf · /);
+    assert.equal(list.children[2].style.cursor, "copy");
+    assert.equal(document.keys.size, 1);
+    tapRow(c);
+    assert.equal(banner.style.display, "none");
+    assert.equal(document.keys.size, 0);
+    assert.equal(body.length, before, "the same run: nothing to compare");
+    startComparePick(c);
+    tapRow(a);
+    const view = body.at(-1);
+    assert.equal(body.length, before + 1);
+    assert.ok(view.innerHTML.indexOf("aaaa1111…") < view.innerHTML.indexOf("cccc3333…"), "the older run on the left");
+    assert.equal(historyState().comparePick, null);
+    assert.equal(document.keys.size, 1, "the compare view's Esc");
+    openViewer(viewerItems(a), 0);   // a tap on an output: the viewer on top of the compare view
+    assert.deepEqual([window.keys.size, document.keys.size], [1, 1]);
+    press(window, "Escape");         // window sees a key before document does: only the viewer closes
+    assert.ok(body.at(-1).removed && !view.removed);
+    assert.deepEqual([window.keys.size, document.keys.size], [0, 1]);
+    press(document, "Escape");
+    assert.ok(view.removed);
+    assert.equal(document.keys.size, 0);
+    startComparePick(b);
+    press(document, "Escape");
+    assert.equal(historyState().comparePick, null);
+    assert.equal(banner.style.display, "none");
+    assert.equal(document.keys.size, 0);
+    assert.equal(list.children[2].style.cursor, undefined, "rows are plain again");
+});
+
+test("a picked run that leaves the list ends pick mode with a toast; new runs coming in keep it", async () => {
+    const [, b, a] = historyState().historyRuns;
+    startComparePick(a);
+    api.fetchApi = async url => answer(url.includes("/workflows") ? { workflows: [] } : { runs: [listed(run(4, "dddd4444"))], more: false });
+    await refreshHistory();   // the 2 s poll brings a new run
+    assert.equal(historyState().comparePick, a);
+    toasts.length = 0;
+    api.fetchApi = async () => answer({ deleted: 1 });
+    await deleteHistoryRun(a);
+    assert.equal(historyState().comparePick, null);
+    assert.deepEqual(toasts.map(t => [t.severity, t.summary]), [["warn", "Compare cancelled"]]);
+    assert.equal(document.keys.size, 0);
+    startComparePick(b);
+    api.fetchApi = async url => answer(url.includes("/workflows") ? { workflows: [] } : { runs: [listed(run(3, "cccc3333", { state: "error" }))], more: false });
+    setHistoryFilter({ status: "error" });
+    await settle();
+    assert.equal(historyState().comparePick, null, "filtered away");
+    assert.equal(toasts.length, 2);
 });
 
 let failed = 0;

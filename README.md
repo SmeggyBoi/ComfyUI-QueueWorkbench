@@ -35,6 +35,10 @@ runs of the same workflow apart, and fix a queued run without re-queueing it.
   grid, one tile per run with its first output (+N when it has more). A tile
   opens its outputs full screen: swipe or use ‹ › / ← → between them, pinch or
   double-tap to zoom, and download the file.
+- **Compare two runs.** *⇄ Compare…* in a finished run's detail card, then tap
+  another run, or *⇄ vs previous* for the workflow's run before it: their
+  outputs side by side, only the settings that differ, and the prompts with
+  removed words struck out and added ones in green.
 - **Survives restarts.** Pending and paused runs are mirrored to a local SQLite
   file. After a restart or crash they show up as *Saved from previous session*,
   where you can restore or discard them. Nothing re-runs on its own.
@@ -86,6 +90,7 @@ red banner at the top tells you so.
 | Restore after a restart | *Saved from previous session* section: restore one or all, or discard |
 | See finished runs | *History* tab; *Show more* loads older ones |
 | See finished runs as a gallery | ▦ in the *History* tab's filter bar (☰ for the list again). Tap a tile to see its outputs full screen: swipe or ‹ › / ← → between them, pinch or double-tap to zoom, ⬇ to download, Esc or a tap beside the image to close. |
+| Compare two finished runs | *⇄ Compare…* in a run's detail card, then tap the other run (Esc or *Cancel* to stop), or *⇄ vs previous* for the run of the same workflow before it |
 | Run a finished run again | ⤴ on its history row (same seed) |
 | Run a finished run with new seeds | *🎲 New seed* in its detail card, or *🎲 ×* next to a number (1–20) for that many variations. They go to the end of the queue. |
 | Duplicate a queued run with new seeds | *⧉ ×* next to a number in a pending or running run's detail card |

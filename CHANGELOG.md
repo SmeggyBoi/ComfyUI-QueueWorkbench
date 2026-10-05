@@ -13,6 +13,7 @@
 - Variations: *🎲 New seed* or *🎲 ×N* in a finished run's detail card, and *⧉ ×N* in a pending or running run's card, queue it again at the end of the queue with every seed re-rolled (seeds that matched still match).
 - History filters: status, workflow and a search over prompts and workflow names, over every stored run. Pin a run with ☆ to keep it: pinned runs are never trimmed and don't count toward the 200.
 - Gallery: ▦ in the History tab shows one tile per run with its first output; a tile opens the run's outputs in a full-screen viewer (swipe or ‹ › / ← → between them, pinch or double-tap to zoom, download).
+- Compare two finished runs: *⇄ Compare…* in a run's detail card, then a tap on the other run, or *⇄ vs previous* for the workflow's run before it. Shows their outputs side by side, the settings that differ, and a word-level diff of the prompts.
 
 ## 1.0.0
 

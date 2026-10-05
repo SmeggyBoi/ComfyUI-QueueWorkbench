@@ -351,6 +351,7 @@ function createPanel() {
             <select id="qm-filter-workflow" title="Workflow" style="${FILTER}flex:1 1 120px;min-width:0;">${workflowOptionsHtml([], null)}</select>
             <input id="qm-filter-q" type="search" placeholder="Search prompts" style="${FILTER}flex:1 1 140px;min-width:0;">
             <button id="qm-layout" title="Show as a grid of outputs" style="${FILTER}cursor:pointer;">▦</button>
+            <div id="qm-compare-pick" style="display:none;width:100%;align-items:center;gap:8px;padding:4px 4px 4px 8px;border-radius:5px;background:#2a2547;color:#c9b8ff;font-size:12px;"></div>
         </div>
         <div id="qm-history"></div>
         <button id="qm-history-more" style="display:none;${BTN}width:100%;margin-top:6px;">Show more</button>`;
@@ -388,6 +389,7 @@ function createPanel() {
 function setTab(tab) {
     activeTab = tab;
     hideDetailCard();
+    leaveComparePick();
     updateTabs();
     if (tab === "history") {
         refreshHistory();
@@ -844,6 +846,10 @@ function requeueBody(item, clientId) {
 // like variation_seed_strength is never a seed.
 const isSeed = (input, value) => /seed/i.test(input) && Number.isInteger(value) && value !== 0;
 
+// A prompt's unique seeds, the values a variation re-rolls
+const seedValues = prompt => [...new Set(Object.values(prompt || {}).flatMap(n => Object.entries(n?.inputs || {}))
+    .filter(([k, v]) => isSeed(k, v)).map(([, v]) => v))];
+
 // A seed in [1, 2^31 - 1], other than old. Narrower than ComfyUI's own "randomize" range because
 // several nodes (SeedVR2, Comfy API nodes, some TTS / utility packs) cap their seed input at a
 // 32-bit int and reject anything wider.
@@ -997,9 +1003,7 @@ function detailHtml(item, info, where, run = null) {
     const gallery = (label, thumbs, border) => thumbs.length ? `
         ${label ? `<div style="margin-top:12px;font-size:11px;color:#8a8a8a;">${label}</div>` : ""}
         <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:${label ? 4 : 12}px;">${thumbs.map(t => thumbHtml(t, 112, border)).join("")}</div>` : "";
-    // Unique seeds, the values a variation re-rolls
-    const seeds  = [...new Set(Object.values(prompt).flatMap(n => Object.entries(n?.inputs || {}))
-        .filter(([k, v]) => isSeed(k, v)).map(([, v]) => v))];
+    const seeds  = seedValues(prompt);
     const row = (label, color, body) => `
         <div style="display:grid;grid-template-columns:64px 1fr;gap:8px;align-items:baseline;margin-top:6px;">
             <span style="color:${color};font-size:11px;">${label}</span>
@@ -1035,6 +1039,10 @@ function detailHtml(item, info, where, run = null) {
             <button class="qm-vary-many" title="Queue this many copies with new seeds, at the end of the queue" style="${BTN}padding:2px 10px;">${run ? "🎲" : "⧉"} ×</button>
             <input class="qm-vary-count" type="number" min="1" max="${MAX_VARIATIONS}" step="1" value="${variationCount}" aria-label="Number of variations" style="width:48px;box-sizing:border-box;background:#141414;border:1px solid #444;color:#ddd;border-radius:5px;padding:2px 4px;font-size:12px;">
         </div>` : ""}
+        ${run ? `<div style="display:flex;align-items:center;gap:6px;margin-top:6px;">
+            <button class="qm-compare" title="Then tap the run to compare this one with" style="${BTN}padding:2px 10px;">⇄ Compare…</button>
+            ${previousRun(run, historyRuns) ? `<button class="qm-compare-prev" title="Compare with the run of this workflow before it" style="${BTN}padding:2px 10px;">⇄ vs previous</button>` : ""}
+        </div>` : ""}
         ${error ? `<div style="margin-top:8px;max-height:120px;overflow-y:auto;color:#f88;font-size:12px;white-space:pre-wrap;word-break:break-word;user-select:text;">${esc([error.node, error.message].filter(Boolean).join(": "))}</div>` : ""}
         ${gallery("Outputs", outputs, OUTPUT_BORDER)}
         ${gallery(outputs.length ? "Inputs" : "", info.thumbs, "#3a3a3a")}
@@ -1069,6 +1077,12 @@ function detailCard() {
 // Buttons inside a detail card (hover card or inline on touch); run = the History run shown
 function wireDetailButtons(container, item, run = null) {
     container.querySelector(".qm-detail-edit")?.addEventListener("click", e => { e.stopPropagation(); editQueuedRun(item).catch(console.error); });
+    container.querySelector(".qm-compare")?.addEventListener("click", e => { e.stopPropagation(); startComparePick(run); });
+    container.querySelector(".qm-compare-prev")?.addEventListener("click", e => {
+        e.stopPropagation();
+        const previous = previousRun(run, historyRuns);   // looked up again: it may have left the list since the card opened
+        if (previous) openCompare(previous, run);
+    });
     container.querySelector(".qm-detail-top")?.addEventListener("click", e => {
         e.stopPropagation();
         hideDetailCard();
@@ -2155,8 +2169,13 @@ function renderHistory() {
     const list = document.getElementById("qm-history");
     const more = document.getElementById("qm-history-more");
     if (!list || !more) return;
+    // A picked run that left the list (removed, aged out, filtered away) can't be tapped any more
+    if (comparePick && historyLoaded && !historyRuns.some(r => r.item[1] === comparePick.item[1])) {
+        leaveComparePick();
+        toast("warn", "Compare cancelled", "The run you picked is no longer in the list.");
+    }
     const key = JSON.stringify([historyRuns.map(r => [r.id, r.pinned]), historyMore, expandedId, Object.keys(workflowNames).length,
-        historyLoaded, historyError, historyFilter, historyLayout]);
+        historyLoaded, historyError, historyFilter, historyLayout, comparePick?.item[1]]);
     if (key === lastHistoryKey) return;
     lastHistoryKey = key;
     more.style.display = historyMore ? "block" : "none";
@@ -2182,6 +2201,7 @@ function renderHistory() {
             const el    = document.createElement("div");
             el.style.cssText = `position:relative;aspect-ratio:1;cursor:${items.length ? "pointer" : "default"};`;
             el.innerHTML = galleryTileHtml(run);
+            attachPick(el, run);
             if (items.length) el.addEventListener("click", () => openViewer(items, 0));
             // The detail card on hover; on touch screens a tap goes straight to the viewer
             if (HOVER) attachDetail(el, run.item, info.get(run.item[1]), renderHistory, `${f.mark} ${f.label} ${f.text}`.trim(), run);
@@ -2209,6 +2229,7 @@ function renderHistory() {
             min-height: 58px;
         `;
         el.innerHTML = historyRowHtml(run, info.get(id));
+        attachPick(el, run);
         el.querySelector(".qm-load-workflow").addEventListener("click", (e) => {
             e.stopPropagation();
             fullHistoryItem(run).then(loadWorkflowFromItem).catch(err => toast("error", "Couldn't load the run", err.message));
@@ -2387,6 +2408,216 @@ function openViewer(items, index) {
     window.addEventListener("keydown", onKey, true);
     document.body.appendChild(overlay);
     show(index);
+}
+
+// ---------------------------------------------------------------------------
+// Compare two finished runs — outputs side by side, the settings that differ and a
+// word diff of the prompts. ⇄ Compare… in a detail card starts pick mode: the next
+// tap on a row or tile picks the second run.
+// ---------------------------------------------------------------------------
+let comparePick = null;   // the run ⇄ Compare… was pressed on, while waiting for the second one
+
+const onComparePickKey = e => {
+    if (e.key !== "Escape") return;
+    e.stopPropagation();
+    leaveComparePick();
+    renderHistory();
+};
+
+function startComparePick(run) {
+    comparePick = run;
+    expandedId  = null;   // fold the open detail away: the list is for picking now
+    hideDetailCard();
+    document.addEventListener("keydown", onComparePickKey, true);
+    const f      = finishedInfo(run);
+    const banner = document.getElementById("qm-compare-pick");
+    banner.innerHTML = `
+        <span style="flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">Tap a run to compare with ${esc(workflowName(run.item) || "Unnamed workflow")}${f.finishedAt ? ` · ${fmtTime(f.finishedAt)}` : ""}</span>
+        <button class="qm-compare-cancel" style="${BTN}padding:2px 10px;">Cancel</button>`;
+    banner.querySelector(".qm-compare-cancel").addEventListener("click", () => { leaveComparePick(); renderHistory(); });
+    banner.style.display = "flex";
+    renderHistory();
+}
+
+// Ends pick mode; the caller re-renders the list
+function leaveComparePick() {
+    comparePick = null;
+    document.removeEventListener("keydown", onComparePickKey, true);
+    document.getElementById("qm-compare-pick").style.display = "none";
+}
+
+// The tap that ends pick mode: the comparison, or nothing when it's the picked run itself
+function pickCompare(run) {
+    const first = comparePick;
+    leaveComparePick();
+    renderHistory();
+    if (first.item[1] !== run.item[1]) openCompare(first, run);
+}
+
+// In pick mode a tap anywhere on a row or tile, its buttons included, picks that run instead
+// of expanding it or opening the viewer
+function attachPick(el, run) {
+    if (!comparePick) return;
+    el.style.cursor = "copy";
+    el.addEventListener("click", e => {
+        e.stopImmediatePropagation();
+        e.preventDefault();
+        pickCompare(run);
+    }, true);
+}
+
+// "vs previous": the newest loaded run of the same workflow that is older than run. None for
+// runs without a workflow identity (prompts queued by scripts would all match each other).
+function previousRun(run, runs) {
+    const key = groupKey(run.item);
+    return key == null ? undefined : runs.find(r => r.id < run.id && groupKey(r.item) === key);
+}
+
+// Word diff of two prompts: [{ op: "same" | "del" | "add", text }], neighbours of one op merged.
+// Tokens are words with their trailing whitespace. The common start and end are cut off first;
+// the middle gets an LCS, or, past WORD_DIFF_CELLS word pairs, one del and one add.
+const WORD_DIFF_CELLS = 4_000_000;
+
+function wordDiff(a, b) {
+    const ta = a.match(/\S+\s*|\s+/g) || [];
+    const tb = b.match(/\S+\s*|\s+/g) || [];
+    let start = 0, endA = ta.length, endB = tb.length;
+    while (start < endA && start < endB && ta[start] === tb[start]) start++;
+    while (endA > start && endB > start && ta[endA - 1] === tb[endB - 1]) { endA--; endB--; }
+    const out  = [];
+    const push = (op, text) => {
+        if (out.at(-1)?.op === op) out.at(-1).text += text;
+        else if (text) out.push({ op, text });
+    };
+    push("same", ta.slice(0, start).join(""));
+    const ma = ta.slice(start, endA), mb = tb.slice(start, endB);
+    const n = ma.length, m = mb.length;
+    if (n * m > WORD_DIFF_CELLS) {
+        push("del", ma.join(""));
+        push("add", mb.join(""));
+    } else {
+        // lcs[i * (m + 1) + j] = LCS length of ma[i..] and mb[j..]; at most min(n, m) <= 2000, so 16 bits do
+        const lcs = new Uint16Array((n + 1) * (m + 1));
+        for (let i = n - 1; i >= 0; i--) {
+            for (let j = m - 1; j >= 0; j--) {
+                lcs[i * (m + 1) + j] = ma[i] === mb[j] ? lcs[(i + 1) * (m + 1) + j + 1] + 1
+                    : Math.max(lcs[(i + 1) * (m + 1) + j], lcs[i * (m + 1) + j + 1]);
+            }
+        }
+        let i = 0, j = 0;
+        while (i < n || j < m) {
+            if (i < n && j < m && ma[i] === mb[j]) { push("same", ma[i++]); j++; }
+            else if (j === m || (i < n && lcs[(i + 1) * (m + 1) + j] >= lcs[i * (m + 1) + j + 1])) push("del", ma[i++]);
+            else push("add", mb[j++]);
+        }
+    }
+    push("same", ta.slice(endA).join(""));
+    return out;
+}
+
+// The settings that tell two runs apart: { rows: [{ cat, onlyA, onlyB }], same }. Per chip
+// category (settingChips) the chips only A has and only B has, then a "seeds" row if the
+// seeds differ; same = the number of chips both have.
+function settingsDiff(promptA, promptB) {
+    const ca  = settingChips(promptA), cb = settingChips(promptB);
+    const has = (chips, c) => chips.some(o => o.cat === c.cat && o.text === c.text);
+    const rows = CATEGORY_ORDER.map(cat => ({
+        cat,
+        onlyA: ca.filter(c => c.cat === cat && !has(cb, c)).map(c => c.text),
+        onlyB: cb.filter(c => c.cat === cat && !has(ca, c)).map(c => c.text),
+    })).filter(r => r.onlyA.length || r.onlyB.length);
+    const sa = seedValues(promptA), sb = seedValues(promptB);
+    const seeds = { cat: "seeds", onlyA: sa.filter(s => !sb.includes(s)).map(String), onlyB: sb.filter(s => !sa.includes(s)).map(String) };
+    if (seeds.onlyA.length || seeds.onlyB.length) rows.push(seeds);
+    return { rows, same: ca.filter(c => has(cb, c)).length };
+}
+
+// The comparison of a, the older run (left, or on top on narrow screens), with b
+function compareHtml(a, b) {
+    const pair   = (left, right) => `<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(300px,100%),1fr));gap:8px 12px;margin-top:6px;">${left}${right}</div>`;
+    const title  = text => `<div style="margin-top:18px;font-size:11px;color:#8a8a8a;text-transform:uppercase;letter-spacing:0.05em;">${text}</div>`;
+    const quiet  = text => `<div style="margin-top:6px;color:#777;">${text}</div>`;
+    const header = (run, side) => {
+        const f = finishedInfo(run);
+        return `<div style="min-width:0;">
+            <div style="font-size:11px;color:#777;">${side}</div>
+            <div style="font-size:14px;font-weight:600;color:#e6e6e6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(workflowName(run.item) || "Unnamed workflow")}</div>
+            <div style="font-size:12px;color:#9a9a9a;"><span style="color:${f.color};">${f.mark}</span> ${esc(f.text)} · <span style="font-family:monospace;">${esc(shortId(run.item[1]))}</span></div>
+        </div>`;
+    };
+    // The first output (tap: the viewer over all of them), +N more
+    const output = (run, side) => {
+        const media = outputMedia(run.outputs);
+        if (!media.length) return `<div style="display:flex;align-items:center;justify-content:center;height:120px;background:#141414;border-radius:4px;color:#555;">No output</div>`;
+        return `<div style="min-width:0;">
+            <div data-side="${side}" data-index="0" style="cursor:zoom-in;">${mediaHtml(media[0], "display:block;width:100%;max-height:min(50vh,420px);object-fit:contain;background:#111;border-radius:4px;")}</div>
+            ${media.length > 1 ? `<span data-side="${side}" data-index="1" style="display:inline-block;margin-top:4px;color:#7b9cfa;cursor:pointer;">+${media.length - 1} more</span>` : ""}
+        </div>`;
+    };
+    const diff     = settingsDiff(a.item[2], b.item[2]);
+    const values   = (cat, texts) => texts.length
+        ? texts.map(text => cat === "seeds" ? `<span style="font-family:monospace;font-size:11px;color:#cfcfcf;">${esc(text)}</span>` : chipHtml({ cat, text, diff: true }, 420, 11)).join("")
+        : `<span style="color:#555;">—</span>`;
+    const settings = diff.rows.map(r => {
+        const look = r.cat === "seeds" ? { label: "Seeds", color: "#8a8a8a" } : CATEGORIES[r.cat];
+        return `<div style="display:grid;grid-template-columns:64px 1fr;gap:8px;align-items:baseline;margin-top:6px;">
+            <span style="color:${look.color};font-size:11px;">${look.label}</span>
+            <div style="display:flex;flex-wrap:wrap;align-items:center;gap:4px;min-width:0;">${values(r.cat, r.onlyA)}<span style="color:#777;">→</span>${values(r.cat, r.onlyB)}</div>
+        </div>`;
+    }).join("");
+    // Prompts matched by node and input: identical ones folded, one-sided ones whole, the rest as a
+    // word diff (removed words struck out on the older side, added ones green on the newer)
+    const textsA = promptTexts(a.item[2]), textsB = promptTexts(b.item[2]);
+    const box    = html => `<div style="max-height:260px;overflow-y:auto;background:#141414;border:1px solid #333;border-radius:4px;padding:8px 10px;white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:1.5;user-select:text;cursor:text;color:#cfcfcf;">${html}</div>`;
+    const label  = text => `<div style="margin-top:12px;font-size:11px;color:#8a8a8a;">${text}</div>`;
+    const prompts = [...new Set([...textsA, ...textsB].map(t => t.key))].map(key => {
+        const ta = textsA.find(t => t.key === key), tb = textsB.find(t => t.key === key);
+        const name = esc((ta || tb).label);
+        if (!ta || !tb) return label(`${name} — only in the ${ta ? "older" : "newer"} run`) + box(esc((ta || tb).text));
+        if (ta.text === tb.text) return `<details style="margin-top:12px;"><summary style="font-size:11px;color:#8a8a8a;cursor:pointer;">${name} — identical</summary>${box(esc(ta.text))}</details>`;
+        const parts = wordDiff(ta.text, tb.text);
+        const side  = (op, tag, look) => parts.filter(p => p.op === "same" || p.op === op)
+            .map(p => p.op === "same" ? esc(p.text) : `<${tag} style="${look}">${esc(p.text)}</${tag}>`).join("");
+        return label(name) + pair(box(side("del", "del", "color:#f88;background:#ff666622;")),
+                                  box(side("add", "ins", "color:#7e7;background:#66ff6622;text-decoration:none;")));
+    }).join("");
+    return `
+        ${groupKey(a.item) !== groupKey(b.item) ? `<div style="margin-bottom:10px;padding:6px 10px;border-radius:5px;background:#2a2617;color:#d9b54a;">These runs are from different workflows: settings and prompts are matched by node, so some may not line up.</div>` : ""}
+        ${pair(header(a, "Older"), header(b, "Newer"))}
+        ${pair(output(a, 0), output(b, 1))}
+        ${title("Settings that differ")}
+        ${settings || quiet("None")}
+        ${quiet(`${diff.same} setting${diff.same === 1 ? "" : "s"} identical`)}
+        ${title("Prompts")}
+        ${prompts || quiet("None")}`;
+}
+
+// Full screen over the panel and the detail card; the viewer opens on top of it
+function openCompare(x, y) {
+    const [a, b] = x.id < y.id ? [x, y] : [y, x];
+    hideDetailCard();
+    const overlay = document.createElement("div");
+    overlay.style.cssText = "position:fixed;inset:0;z-index:10001;overflow-y:auto;background:#1a1a1a;font:12px sans-serif;color:#bbb;";
+    overlay.innerHTML = `
+        <div style="position:sticky;top:0;z-index:1;display:flex;align-items:center;justify-content:space-between;padding:10px 16px;background:#252525;border-bottom:1px solid #444;">
+            <span style="font-weight:600;font-size:14px;color:#e6e6e6;">Compare runs</span>
+            <button class="qm-compare-close" title="Close (Esc)" style="background:none;border:none;color:#aaa;font-size:18px;cursor:pointer;">✕</button>
+        </div>
+        <div style="max-width:1100px;margin:0 auto;padding:12px 16px 24px;">${compareHtml(a, b)}</div>`;
+    const onKey = e => {
+        if (e.key !== "Escape") return;
+        e.stopPropagation();
+        close();
+    };
+    const close = () => {
+        overlay.remove();
+        document.removeEventListener("keydown", onKey, true);
+    };
+    overlay.querySelector(".qm-compare-close").addEventListener("click", close);
+    overlay.querySelectorAll("[data-side]").forEach(el =>
+        el.addEventListener("click", () => openViewer(viewerItems([a, b][el.dataset.side]), +el.dataset.index)));
+    document.addEventListener("keydown", onKey, true);
+    document.body.appendChild(overlay);
 }
 
 // ---------------------------------------------------------------------------
@@ -2658,6 +2889,7 @@ function togglePanel() {
     } else {
         stopPolling();
         hideDetailCard();
+        leaveComparePick();
     }
     const btn = document.getElementById("qm-toolbar-btn");
     if (btn) btn.style.background = panelOpen ? "#7b5cfa" : "";
