@@ -121,7 +121,7 @@ Push notifications are off unless you configure an ntfy topic. Copy
 | Key | Meaning |
 |---|---|
 | `ntfy_url` | Full topic URL, e.g. `https://ntfy.sh/my-secret-topic` or your own server |
-| `public_url` | The address your phone uses to reach ComfyUI. If set, the notification attaches the finished file and gets an *Open in browser* button. |
+| `public_url` | The address your phone uses to reach ComfyUI. If set, the notification attaches the finished file and gets a *Save* button that downloads it to your phone. |
 | `ntfy_quiet_seconds` | Waits this long after the last finished run before notifying. Workflows that finish in several passes then send one notification for the final file. Default 90. The *Queue finished* summary (two or more runs) waits for the queue to stay empty this long. |
 | `oom_retry` | Queue a run again once, at the front, when it fails because the GPU ran out of memory. Never twice, not while the queue is paused. Only runs queued from the ComfyUI page; runs queued by scripts or the API are left to the script. Not for VHS meta-batch runs. Default `true`. |
 
@@ -161,6 +161,12 @@ network (a *tailnet*) without opening any ports to the internet.
    ```
 
 4. Install the ntfy app on your phone and subscribe to the same topic.
+
+The ntfy app keeps attachments in its own storage: its *Open* button shows the
+file but doesn't add it to your gallery. *Save* opens a link your browser
+downloads instead of displaying, into the phone's `Download` folder (in Google
+Photos under Library → Download). Firefox asks once more before every download
+(*Download*), and the tab it opened for the link stays behind.
 
 The download link only works on devices in your tailnet, so it's useless to
 anyone else even when the notification goes through the public ntfy.sh server.

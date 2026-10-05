@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Notifications: the *Open in browser* button is now *Save*. It downloads the finished file to the phone (its `Download` folder) instead of showing it in a browser tab, and clears the notification.
+
 ## 1.1.0
 
 - History tab: the last 200 finished runs, newest first, kept across restarts. Same rows as the queue plus the first output, a ✓ / ✕ / ⏹ status mark, finish time and duration; the detail card shows every output and the error of a failed run.

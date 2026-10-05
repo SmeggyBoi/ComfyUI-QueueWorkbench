@@ -20,7 +20,7 @@ import folder_paths
 from aiohttp import web
 from server import PromptServer
 
-from . import estimates, oom_retry, summary
+from . import download, estimates, oom_retry, summary
 
 WEB_DIRECTORY = "./web"
 NODE_CLASS_MAPPINGS = {}
@@ -112,14 +112,16 @@ _ntfy_lock   = threading.Lock()
 _best_output = [None]       # newest (fname, subfolder, ftype) seen in the current burst
 
 
-def _send_ntfy(title, message, priority="high", tags="white_check_mark", attach_url=None, filename=None):
+def _send_ntfy(title, message, priority="high", tags="white_check_mark", out=None):
     # Everything goes in query parameters: no header encoding issues with emoji titles
     params = {"title": title, "priority": priority, "tags": tags}
-    if attach_url:
-        params["attach"] = attach_url
-        params["actions"] = f"view, Open in browser, {attach_url}"
-    if filename:
-        params["filename"] = filename
+    if out:
+        # The ntfy app adds its own Open / Browse buttons for the attachment, so Save takes the
+        # third and last slot. It opens a URL the browser downloads instead of showing;
+        # clear=true drops the notification on tap.
+        params["attach"] = _output_url("/view", out)
+        params["filename"] = out[0]
+        params["actions"] = f"view, Save, {_output_url('/queue_workbench/download', out)}, clear=true"
     request = urllib.request.Request(f"{_config['ntfy_url']}?{urllib.parse.urlencode(params)}",
                                      data=message.encode("utf-8"), method="POST")
     try:
@@ -172,21 +174,20 @@ def _fire_ntfy():
     if not _config["public_url"]:
         _send_ntfy("Generation complete ✅", f"Finished: {fname}")
         return
-    attach_url = _view_url(out)
-    _send_ntfy("Generation complete ✅", f"Tap to download {fname}.", attach_url=attach_url, filename=fname)
+    _send_ntfy("Generation complete ✅", f"Tap Save to download {fname}.", out=out)
 
 
-def _view_url(out):
+def _output_url(path, out):
     fname, subfolder, ftype = out
     params = {"filename": fname, "type": ftype}
     if subfolder:
         params["subfolder"] = subfolder
-    return f"{_config['public_url']}/view?{urllib.parse.urlencode(params)}"
+    return f"{_config['public_url']}{path}?{urllib.parse.urlencode(params)}"
 
 
 def _send_summary(title, message, out):
     if out and _config["public_url"]:
-        _send_ntfy(title, message, tags="checkered_flag", attach_url=_view_url(out), filename=out[0])
+        _send_ntfy(title, message, tags="checkered_flag", out=out)
     else:
         _send_ntfy(title, message, tags="checkered_flag")
 
@@ -300,6 +301,18 @@ async def clear_preview(request):
         _step_frames = []
         _step_id = 0
     return web.Response(status=200)
+
+
+@routes.get("/queue_workbench/download")
+async def download_output(request):
+    """An output file as an attachment, so the phone's browser saves it instead of showing it
+    (the notification's Save button)."""
+    query = request.rel_url.query
+    status, path = download.resolve(query.get("filename", ""), query.get("subfolder", ""),
+                                    query.get("type", "output"), folder_paths.get_directory_by_type)
+    if status != 200:
+        return web.Response(status=status)
+    return web.FileResponse(path, headers=download.headers(os.path.basename(path)))
 
 
 @routes.get("/queue_workbench/build")
