@@ -39,9 +39,10 @@ const toasts = [];
 const api = { addEventListener() {} };   // the History tests set api.fetchApi
 const app = { registerExtension() {}, extensionManager: { toast: { add: t => toasts.push(t) } } };
 const { galleryTileHtml, viewerItems, zoomView, openViewer, setHistoryLayout, setHistoryFilter, fmtTime, historyState,
-        wordDiff, settingsDiff, compareHtml, previousRun, detailHtml, groupInfo, startComparePick, refreshHistory, deleteHistoryRun } = new Function("app", "api",
+        wordDiff, settingsDiff, compareHtml, previousRun, detailHtml, groupInfo, startComparePick, refreshHistory, deleteHistoryRun,
+        setTab, openCompare } = new Function("app", "api",
     src + "\nreturn { galleryTileHtml, viewerItems, zoomView, openViewer, setHistoryLayout, setHistoryFilter, fmtTime, wordDiff, settingsDiff, compareHtml, previousRun,"
-        + " detailHtml, groupInfo, startComparePick, refreshHistory, deleteHistoryRun, historyState: () => ({ historyRuns, comparePick }) };")(app, api);
+        + " detailHtml, groupInfo, startComparePick, refreshHistory, deleteHistoryRun, setTab, openCompare, historyState: () => ({ historyRuns, comparePick }) };")(app, api);
 
 const tests = [];
 const test = (name, fn) => tests.push([name, fn]);
@@ -131,6 +132,31 @@ test("viewer: ← / → step through the items and stop at the ends; Esc or ✕ 
     body.at(-1).found[".qm-viewer-close"].listeners.click[0]();
     assert.ok(body.at(-1).removed);
     assert.equal(window.keys.size, 0, "no listener left from either viewer");
+});
+
+test("viewer: a tap beside the image closes on the stage's click, not on pointerup; a pan/swipe ending there doesn't close", () => {
+    const items = viewerItems(run(1, "a"));
+    const rect  = { left: 0, top: 0, width: 400, height: 300 };
+
+    openViewer(items, 0);
+    const stage = body.at(-1).found[".qm-viewer-stage"];
+    stage.getBoundingClientRect = () => rect;
+    stage.setPointerCapture     = () => {};
+    stage.listeners.pointerdown[0]({ pointerId: 1, target: stage, clientX: 0, clientY: 0 });
+    stage.listeners.pointerup[0]({ pointerId: 1, type: "pointerup", clientX: 0, clientY: 0 });
+    assert.ok(!body.at(-1).removed, "pointerup alone doesn't close it");
+    stage.listeners.click[0]();
+    assert.ok(body.at(-1).removed, "the stage's own click, after the pointer events, does");
+
+    openViewer(items, 0);
+    const stage2 = body.at(-1).found[".qm-viewer-stage"];
+    stage2.getBoundingClientRect = () => rect;
+    stage2.setPointerCapture     = () => {};
+    stage2.listeners.pointerdown[0]({ pointerId: 1, target: stage2, clientX: 0, clientY: 0 });
+    stage2.listeners.pointermove[0]({ pointerId: 1, clientX: 80, clientY: 0 });   // a swipe
+    stage2.listeners.pointerup[0]({ pointerId: 1, type: "pointerup", clientX: 80, clientY: 0 });
+    stage2.listeners.click[0]();
+    assert.ok(!body.at(-1).removed, "a pan/swipe that ends over the black area must not close");
 });
 
 test("▦ shows the runs as tiles and a tile opens its run's outputs in the viewer; ☰ goes back to rows", async () => {
@@ -289,6 +315,31 @@ test("pick mode: ⇄ Compare…, then a tap on another run compares them, older 
     assert.equal(banner.style.display, "none");
     assert.equal(document.keys.size, 0);
     assert.equal(list.children[2].style.cursor, undefined, "rows are plain again");
+});
+
+test("setTab ends pick mode for the rows too: no stale cursor or pick listener to throw from", async () => {
+    const [c, , a] = historyState().historyRuns;
+    const list = els["qm-history"];
+    startComparePick(c);
+    assert.equal(list.children[2].style.cursor, "copy");
+    setTab("queue");
+    setTab("history");   // triggers a background refreshHistory(); let it finish before the next test
+    assert.equal(historyState().comparePick, null);
+    assert.notEqual(list.children[2].style.cursor, "copy", "setTab re-rendered the rows out of pick mode");
+    assert.equal(list.children[2].listeners.click, undefined, "no pick listener left over to throw on a stale comparePick");
+    await settle();
+});
+
+test("⇄ vs previous ends pick mode first: no leftover banner or pick listener under the compare view", () => {
+    const [c, , a] = historyState().historyRuns;
+    startComparePick(c);
+    assert.equal(document.keys.size, 1, "pick mode's Esc listener");
+    openCompare(a, c);
+    assert.equal(historyState().comparePick, null);
+    assert.equal(els["qm-compare-pick"].style.display, "none");
+    assert.equal(document.keys.size, 1, "only the compare view's own Esc listener remains");
+    press(document, "Escape");
+    assert.ok(body.at(-1).removed);
 });
 
 test("a picked run that leaves the list ends pick mode with a toast; new runs coming in keep it", async () => {

@@ -390,6 +390,7 @@ function setTab(tab) {
     activeTab = tab;
     hideDetailCard();
     leaveComparePick();
+    renderHistory();
     updateTabs();
     if (tab === "history") {
         refreshHistory();
@@ -2350,9 +2351,10 @@ function openViewer(items, index) {
         view = v;
         img.style.transform = `translate(${v.x}px, ${v.y}px) scale(${v.scale})`;
     };
-    // A tap beside the image closes; two quick taps on it zoom in, or back out
+    // Two quick taps on the image zoom in, or back out; a tap beside it closes (below, on "click":
+    // a touch's click fires after pointerup, at whatever's still there, so closing here rather than
+    // in pointerup keeps that click from reaching the element underneath once we're gone)
     const tap = (target, at) => {
-        if (target === stage) return close();
         if (target !== img) return;
         const now = Date.now();
         if (lastTap && now - lastTap.time < 300 && Math.hypot(at.x - lastTap.at.x, at.y - lastTap.at.y) < 30) {
@@ -2402,6 +2404,7 @@ function openViewer(items, index) {
     };
     stage.addEventListener("pointerup", lift);
     stage.addEventListener("pointercancel", lift);
+    stage.addEventListener("click", () => { if (gesture?.target === stage && !gesture.moved && !gesture.multi) close(); });
     prev.addEventListener("click", () => show(index - 1));
     next.addEventListener("click", () => show(index + 1));
     overlay.querySelector(".qm-viewer-close").addEventListener("click", close);
@@ -2594,6 +2597,8 @@ function compareHtml(a, b) {
 
 // Full screen over the panel and the detail card; the viewer opens on top of it
 function openCompare(x, y) {
+    leaveComparePick();   // harmless when pickCompare already did this; needed for ⇄ vs previous
+    renderHistory();
     const [a, b] = x.id < y.id ? [x, y] : [y, x];
     hideDetailCard();
     const overlay = document.createElement("div");
@@ -2890,6 +2895,7 @@ function togglePanel() {
         stopPolling();
         hideDetailCard();
         leaveComparePick();
+        renderHistory();
     }
     const btn = document.getElementById("qm-toolbar-btn");
     if (btn) btn.style.background = panelOpen ? "#7b5cfa" : "";
