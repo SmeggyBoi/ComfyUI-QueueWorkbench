@@ -85,10 +85,10 @@ red banner at the top tells you so.
 | Open the panel | 🗂️ button next to *Run* |
 | See everything about a run | Hover a row (desktop) or tap it (touch) |
 | Open a run as a normal copy | Click its short ID |
-| Edit a run in place | ✎ on the row or *✎ Edit* in the detail card, change the graph, then **Update queued run** (or **Cancel**) |
+| Edit a run in place | ✎ on the row or *✎ Edit* in the detail card, change the graph, then **Update queued run** (or **Cancel**). While you edit, the queue is frozen: the running job finishes and nothing else starts until you update or cancel. An edit left open elsewhere shows as *FROZEN — editing #n*; **▶ Unfreeze** lets the queue go on. |
 | Keep an edit in the workflow too | Tick *Also update workflow* in the Update dialog. Values you changed in the workflow since queueing are listed; tick the ones to overwrite. The open tab is marked modified (save it yourself); a closed workflow's file is saved. |
 | Reorder | Drag a row onto another. On a phone: long-press ⠿ and drag, or ⤒ Move to top in the run's detail |
-| Pause / resume | *Pause* in the panel header. The running job finishes; nothing else starts until you resume. |
+| Pause / resume | *Pause* in the panel header. The running job finishes; nothing else starts until you resume. Paused runs keep their places and can still be edited, moved or deleted. Every device sees the same state. |
 | Restore after a restart | *Saved from previous session* section: restore one or all, or discard |
 | See finished runs | *History* tab; *Show more* loads older ones |
 | See finished runs as a gallery | ▦ in the *History* tab's filter bar (☰ for the list again). Tap a tile to see its outputs full screen: swipe or ‹ › / ← → between them, pinch or double-tap to zoom, ⬇ to download, Esc or a tap beside the image to close. |
@@ -190,7 +190,6 @@ including this panel and its live preview.
 
 ## Known limitations
 
-- Runs held by *Pause* aren't listed (or editable) until you resume.
 - Updating a run re-reads the graph, so `{a|b}` random prompt syntax is rolled
   again, as it would be on a normal re-queue. Wildcard nodes in "populate" mode
   don't re-run on update.
@@ -206,6 +205,7 @@ including this panel and its live preview.
 - *Also update workflow* patches a tab that isn't the active one in memory only;
   reload the page before visiting it and the change is gone (the queued run keeps
   it). The same workflow open on another device updates when it is reloaded there.
+- A ComfyUI restart ends Pause and edit freezes (the queue is empty afterwards; restored runs start right away).
 
 ## Privacy
 

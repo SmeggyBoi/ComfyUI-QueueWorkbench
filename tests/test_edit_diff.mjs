@@ -94,7 +94,7 @@ test("a change on an input the queued node lacks falls back to the editor's grap
     assert.equal(payload.prompt, output);
 });
 
-test("re-submitting a run (resume / old reorder path) keeps its prompt_id", () => {
+test("re-submitting a run (reorder without the edit backend) keeps its prompt_id", () => {
     const body = resubmitBody(run("keep-me"), -9000);
     assert.equal(body.prompt_id, "keep-me");
     assert.equal(body.number, -9000);

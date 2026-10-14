@@ -8,7 +8,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-const BUILD = "2026-10-14a";
+const BUILD = "2026-10-14b";
 
 // Stale-JS detection (PWA caches extension JS hard): compare this bundle's BUILD
 // against the stamp the backend reads from web/queue_workbench.js ON DISK.
@@ -29,7 +29,8 @@ function qmCheckBuild() {
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
-let isPaused       = false;
+let freezeState    = { paused: false, editing: [] };   // /queue_workbench/freeze: Pause, and the runs being edited
+const isFrozen     = () => freezeState.paused || freezeState.editing.length > 0;
 let panelOpen      = false;
 let pollTimer      = null;
 let queueData      = { queue_running: [], queue_pending: [] };
@@ -90,23 +91,6 @@ async function discardSaved(promptIds) {
     });
 }
 
-async function persistHeld(items) {
-    // Mirror the paused/held items server-side so a pause+shutdown won't lose them
-    try {
-        await api.fetchApi("/queue_workbench/held", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ items }),
-        });
-    } catch (e) { /* non-fatal */ }
-}
-
-async function clearHeld() {
-    try {
-        await api.fetchApi("/queue_workbench/held/clear", { method: "POST" });
-    } catch (e) { /* non-fatal */ }
-}
-
 /**
  * Reorder pending items by deleting all of them and re-submitting
  * in the new order with ascending queue numbers.
@@ -138,53 +122,54 @@ async function reorderQueue(newOrder) {
 }
 
 // Re-submits keep the run's prompt_id, so open edit tabs and other clients still
-// recognise it after pause/resume
+// recognise it after a reorder without the edit backend
 function resubmitBody(item, number) {
     const [, promptId, prompt, extra_data, outputs_to_execute] = item;
     return { prompt_id: promptId, prompt, extra_data: extra_data || {}, outputs_to_execute: outputs_to_execute || [], number };
 }
 
 // ---------------------------------------------------------------------------
-// Pause / resume
-// Pause works by snapshotting all pending items, deleting them from ComfyUI's
-// queue (so it doesn't auto-start them), and holding them in memory.
-// Resume re-submits them in the original order.
-// The currently running item is always allowed to finish.
+// Freeze — Pause, and every open edit tab, freeze the queue on the server
+// (freeze.py): the running job finishes, nothing else starts, and every pending
+// run keeps its place. Nothing is deleted or re-submitted.
 // ---------------------------------------------------------------------------
-let heldItems = []; // pending items held while paused
-
-async function setPaused(val) {
-    isPaused = val;
+async function refreshFreeze() {
+    try {
+        const res = await api.fetchApi("/queue_workbench/freeze");
+        if (res.ok) freezeState = await res.json();
+    } catch (e) { /* offline: keep the last state */ }
     updatePauseButton();
+}
 
-    if (isPaused) {
-        // Snapshot and delete all pending items
-        const data    = await fetchQueue();
-        const pending = (data.queue_pending || []).sort((a, b) => a[0] - b[0]);
-        if (pending.length === 0) return;
+function postFreeze(body) {
+    return api.fetchApi("/queue_workbench/freeze", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    });
+}
 
-        heldItems = pending;
-
-        // Persist held items before deleting them from the native queue, so a
-        // pause-then-shutdown still leaves them restorable next session.
-        await persistHeld(pending);
-
-        // Delete them all from ComfyUI so it won't auto-start them
-        const ids = pending.map(item => item[1]);
-        await api.fetchApi("/queue", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ delete: ids }),
-        });
-        await refreshQueue();
-    } else {
-        // Resume — re-submit held items in original order
-        if (heldItems.length === 0) { await clearHeld(); return; }
-        await reorderQueue(heldItems);
-        heldItems = [];
-        await clearHeld(); // they're back in the native queue (and re-mirrored)
-        await refreshQueue();
+async function setPaused(on) {
+    const res = await postFreeze({ pause: on });
+    if (!res.ok) {
+        toast("error", on ? "Couldn't pause the queue" : "Couldn't resume the queue", "Restart ComfyUI to finish the update.");
+        return;
     }
+    freezeState = await res.json();
+    updatePauseButton();
+    await refreshQueue();
+}
+
+// Freezes the queue for an edit of promptId: "frozen", "started" (no longer pending) or
+// "unsupported" (a backend without /queue_workbench/freeze: edit without freezing)
+async function freezeFor(promptId, token) {
+    const res = await postFreeze({ edit: promptId, token, on: true });
+    if (res.status === 409) return "started";
+    if (!res.ok) return "unsupported";
+    freezeState = await res.json();
+    return "frozen";
+}
+
+function releaseEdit(token) {
+    if (token) postFreeze({ token, on: false }).catch(() => {});
 }
 
 // queuePrompt is passed through natively; setup() only stamps the tab's
@@ -256,7 +241,7 @@ function createPanel() {
         color: #fff;
     `;
     pauseBtn.textContent = "⏸ Pause";
-    pauseBtn.onclick = () => setPaused(!isPaused).catch(console.error);
+    pauseBtn.onclick = () => setPaused(!freezeState.paused).catch(console.error);
     header.appendChild(pauseBtn);
 
     // Close button
@@ -487,7 +472,7 @@ function renderSaved() {
 function updatePauseButton() {
     const btn = document.getElementById("qm-pause-btn");
     if (!btn) return;
-    if (isPaused) {
+    if (freezeState.paused) {
         btn.textContent   = "▶ Resume";
         btn.style.background = "#2a7a2a";
     } else {
@@ -1410,7 +1395,7 @@ function changeLabel(c, prompt) {
 // writes the edited graph back into the same queue entry via the backend.
 // ---------------------------------------------------------------------------
 let canEdit        = false;       // backend has /queue_workbench/replace (needs a ComfyUI restart after install)
-const editSessions = new Map();   // prompt_id -> { promptId, item, path, name, baseline }
+const editSessions = new Map();   // prompt_id -> { promptId, item, path, name, baseline, token }
 let editBusy       = false;
 let lastBarRefresh = 0;
 
@@ -1470,6 +1455,14 @@ async function editQueuedRun(item) {
         toast("warn", "Can't edit this run", "It was queued without a workflow, for example by a script.");
         return;
     }
+    // Freeze first: the run must not start while it is being edited
+    const token = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const held  = await freezeFor(item[1], token);
+    if (held === "started") {
+        toast("warn", "This run has already started", "It can't be edited anymore.");
+        await refreshQueue();
+        return;
+    }
     const name = editTabName(item, queuePosition(item[1]));
     hideDetailCard();
     if (panelOpen && !HOVER) togglePanel();   // on touch screens the panel would cover the graph and the edit bar
@@ -1480,19 +1473,27 @@ async function editQueuedRun(item) {
     const tab = store.activeWorkflow;
     if (!tab || openBefore.has(tab.path)) {
         toast("error", "Couldn't open the run for editing", "ComfyUI didn't open a new tab for it.");
+        releaseEdit(token);
         return;
     }
     // Edits are diffed against the editor's own read-back of the run, not the queued graph:
     // some widgets re-serialize differently on load, and that drift must not count as a change.
     const baseline = await app.graphToPrompt();
-    editSessions.set(item[1], { promptId: item[1], item, path: tab.path, name, baseline });
+    editSessions.set(item[1], { promptId: item[1], item, path: tab.path, name, baseline, token: held === "frozen" ? token : null });
     renderEditBar();
 }
+
+// An edit session ends: forget it and let the queue go on
+function endEditSession(session) {
+    editSessions.delete(session.promptId);
+    releaseEdit(session.token);
+}
+
 
 // Close an edit tab without the "save changes?" prompt: the edit lives in the
 // queue, the tab was only the editor. The workflow service reopens the tab used before.
 async function closeEditTab(session) {
-    editSessions.delete(session.promptId);
+    endEditSession(session);
     renderEditBar();
     const store = workflowStore();
     const wf    = store.openWorkflows.find(w => w.path === session.path);
@@ -1593,14 +1594,14 @@ async function runAlreadyStarted(session) {
     if (choice === "queue") {
         // false = node errors (ComfyUI shows them) or another queue request still in flight
         if (!(await app.queuePrompt(0, 1))) {   // stamp wrapper still sees the session -> original name
-            editSessions.delete(session.promptId);
+            endEditSession(session);
             toast("warn", "The edit wasn't queued", "It's still in this tab. Fix any errors and press Run.");
             return;
         }
         toast("success", "Queued the edited version as a new run");
         await closeEditTab(session);
     } else {
-        editSessions.delete(session.promptId); // plain unsaved copy from now on
+        endEditSession(session); // plain unsaved copy from now on
     }
 }
 
@@ -1611,10 +1612,6 @@ async function updateQueuedRun(session) {
     try {
         const { output, workflow } = await app.graphToPrompt();   // doesn't queue: seed controls don't fire
         queueData = await fetchQueue();
-        if (isPaused && heldItems.some(it => it[1] === session.promptId)) {
-            toast("warn", "This run is paused", "Resume the queue first, then update it.");
-            return;
-        }
         // Patch the run as it is queued now: another edit tab may have copied changes into it
         const current = pendingSorted().find(it => it[1] === session.promptId) ?? session.item;
         const { changes, structural } = diffPrompts(session.baseline.output, output);
@@ -1671,6 +1668,15 @@ async function updateQueuedRun(session) {
     }
 }
 
+// The edit bar's word on the queue: frozen for this edit, paused, or running again (▶ Unfreeze
+// pressed elsewhere); nothing for an edit without a freeze (older backend)
+function freezeNote(session, state) {
+    if (!session.token) return "";
+    if (state.editing.includes(session.promptId)) return " · queue frozen";
+    return state.paused ? " · queue paused" : " · queue running — this run may start";
+}
+
+
 function editBar() {
     let bar = document.getElementById("qm-edit-bar");
     if (bar) return bar;
@@ -1698,19 +1704,21 @@ function renderEditBar() {
     const store = workflowStore();
     if (!store) return;
     const openPaths = new Set((store.openWorkflows || []).map(w => w.path));
-    for (const [id, s] of editSessions) if (!openPaths.has(s.path)) editSessions.delete(id);
+    for (const s of [...editSessions.values()]) if (!openPaths.has(s.path)) endEditSession(s);
     const session = editSessionFor(store.activeWorkflow);
     const bar     = editBar();
     if (!session) { bar.style.display = "none"; return; }
     if (!panelOpen && Date.now() - lastBarRefresh > 2000) {   // keep the position live while the panel isn't polling
         lastBarRefresh = Date.now();
         fetchQueue().then(d => { queueData = d; }).catch(() => {});
+        refreshFreeze();
     }
     const where = queuePosition(session.promptId) ?? "(already started)";
     const name  = workflowName(session.item);
+    const note  = esc(freezeNote(session, freezeState));
     bar.querySelector(".qm-edit-label").innerHTML = name
-        ? `Editing <b>${esc(name)}</b> <span style="color:#999;">(queued ${esc(where)})</span>`
-        : `Editing queued run <b>${esc(where)}</b>`;
+        ? `Editing <b>${esc(name)}</b> <span style="color:#999;">(queued ${esc(where)}${note})</span>`
+        : `Editing queued run <b>${esc(where)}</b><span style="color:#999;">${note}</span>`;
     const update = bar.querySelector(".qm-edit-update");
     update.disabled    = editBusy;
     update.textContent = editBusy ? "Updating…" : "Update queued run";
@@ -1844,19 +1852,26 @@ async function refreshEstimates() {
     applyEstimates();
 }
 
+// The badge, the status bar's queue end and the pending start times. While the queue is frozen
+// nothing counts down: no start times or queue end, and ⏸ on the badge while runs wait.
+function queueTexts(est, pendingIds, frozen) {
+    if (frozen) return { badge: pendingIds.length ? "⏸" : badgeText(est), end: "", starts: {} };
+    return { badge: badgeText(est), end: queueEndText(est), starts: startTimes(est, pendingIds) };
+}
+
+
 // Writes the current estimates into every placeholder that is rendered
 function applyEstimates() {
     const est = estimates;
-    const end = queueEndText(est);
+    const { badge: badgeLabel, end, starts } = queueTexts(est, pendingSorted().map(it => it[1]), isFrozen());
     if (toolbarBtn) {
         toolbarBtn.title = end ? `Queue Workbench · ${end}` : "Queue Workbench";
         const badge = toolbarBtn.querySelector(".qm-badge");
-        badge.textContent   = badgeText(est);
+        badge.textContent   = badgeLabel;
         badge.style.display = badge.textContent ? "block" : "none";
     }
     const eta = document.getElementById("qm-eta");
     if (eta) eta.textContent = end ? ` · ${end}` : "";
-    const starts = startTimes(est, pendingSorted().map(it => it[1]));
     for (const el of document.querySelectorAll("#qm-pending .qm-start")) {
         const s = starts[el.dataset.estId];
         el.textContent = s ? ` · starts ${s.exact ? "" : "≥ "}~${fmtTime(s.at)}` : "";
@@ -1908,6 +1923,17 @@ function renderQueue() {
     applyEstimates();
 }
 
+// " · PAUSED", " · FROZEN — editing #3", " · PAUSED · editing #3 and #1" (+ ▶ Unfreeze while an
+// edit holds the queue); "" when nothing does. pending: in queue order.
+function freezeTagHtml(state, pending) {
+    const where = state.editing.map(id => pending.findIndex(it => it[1] === id) + 1).filter(n => n > 0).map(n => `#${n}`).join(" and ");
+    const text  = [state.paused && "PAUSED", where && `${state.paused ? "" : "FROZEN — "}editing ${where}`].filter(Boolean).join(" · ");
+    if (!text) return "";
+    const unfreeze = where ? ` <button class="qm-unfreeze" style="${BTN}padding:1px 8px;font-size:11px;">▶ Unfreeze</button>` : "";
+    return ` · <span style="color:#f90">${text}</span>${unfreeze}`;
+}
+
+
 function renderQueueRows() {
     const statusEl  = document.getElementById("qm-status");
     const runningEl = document.getElementById("qm-running");
@@ -1919,7 +1945,7 @@ function renderQueueRows() {
 
     // In-place edits keep IDs and numbers, so the prompts themselves are part of the key
     const renderKey = JSON.stringify([running.map(i => i[1]), pending.map(i => [i[0], i[1], i[2]]),
-        isPaused, expandedId, canEdit, Object.keys(workflowNames).length]);
+        freezeState, expandedId, canEdit, Object.keys(workflowNames).length]);
     if (renderKey === lastRenderKey) return;
     lastRenderKey = renderKey;
     updateTabs();
@@ -1929,8 +1955,8 @@ function renderQueueRows() {
     const info = groupInfo([...running, ...pending]);
 
     // Status bar
-    const pausedTag = isPaused ? " · <span style='color:#f90'>PAUSED</span>" : "";
-    statusEl.innerHTML = `Running: ${running.length} · Pending: ${pending.length}${pausedTag}<span id="qm-eta"></span>`;
+    statusEl.innerHTML = `Running: ${running.length} · Pending: ${pending.length}${freezeTagHtml(freezeState, pendingSorted())}<span id="qm-eta"></span>`;
+    statusEl.querySelector(".qm-unfreeze")?.addEventListener("click", () => postFreeze({ edits: "clear" }).then(refreshQueue).catch(console.error));
 
     // Running item
     runningEl.innerHTML = "";
@@ -2053,7 +2079,7 @@ function renderQueueRows() {
                 <span class="qm-drag-handle" style="color:#555;font-size:16px;cursor:grab;flex-shrink:0;touch-action:none;padding:8px 10px;margin:-8px -10px;">⠿</span>
                 <span style="display:flex;gap:3px;flex-shrink:0;">${thumbsHtml(thumbs, 44, "#444", "#333")}</span>
                 <span style="display:flex;flex-direction:column;gap:2px;overflow:hidden;min-width:0;">
-                    <span style="color:#aaa;font-size:12px;white-space:nowrap;">#${i + 1} <span style="color:#666;font-size:11px;">· ${queuedAt(item)}<span class="qm-start" data-est-id="${esc(id)}" style="color:#9a9a9a;"></span> · <span class="qm-load-workflow" data-index="${i}" style="color:#7b9cfa;cursor:pointer;text-decoration:underline;text-decoration-style:dotted;" title="Load this workflow onto canvas">${shortId(id)}</span></span></span>
+                    <span style="color:#aaa;font-size:12px;white-space:nowrap;">#${i + 1}${freezeState.editing.includes(id) ? ' <span style="color:#a78bfa;">✎ editing</span>' : ""} <span style="color:#666;font-size:11px;">· ${queuedAt(item)}<span class="qm-start" data-est-id="${esc(id)}" style="color:#9a9a9a;"></span> · <span class="qm-load-workflow" data-index="${i}" style="color:#7b9cfa;cursor:pointer;text-decoration:underline;text-decoration-style:dotted;" title="Load this workflow onto canvas">${shortId(id)}</span></span></span>
                     ${nameHtml(workflowName(item))}
                 </span>
             </span>
@@ -3011,7 +3037,7 @@ function endTouchDrag() {
 async function refreshQueue() {
     try {
         // The estimates alongside, so rows and their start times are of the same moment
-        const [data] = await Promise.all([fetchQueue(), panelOpen ? refreshEstimates() : null]);
+        const [data] = await Promise.all([fetchQueue(), refreshFreeze(), panelOpen ? refreshEstimates() : null]);
         queueData = data;
         const hasRunning = (queueData.queue_running || []).length > 0;
         if (hasRunning && !isGenerating) {
@@ -3180,8 +3206,6 @@ function createToolbarButton() {
         }
     }, 300);
 }
-
-// Pause no longer uses execution_start to interrupt — see setPaused() above.
 
 // ---------------------------------------------------------------------------
 // Live preview — open a second independent WebSocket connection
@@ -3514,9 +3538,15 @@ app.registerExtension({
         connectPreviewSocket(); // always attach, regardless of panel state
         qmCheckBuild();
         setInterval(renderEditBar, 500);
-        // Badge while the panel is closed; while it is open refreshQueue fetches the estimates
-        refreshEstimates();
-        setInterval(() => { if (!panelOpen) refreshEstimates(); }, ESTIMATES_CLOSED_MS);
+        // Badge while the panel is closed; while it is open refreshQueue fetches both
+        refreshFreeze().then(refreshEstimates);
+        setInterval(() => { if (!panelOpen) refreshFreeze().then(refreshEstimates); }, ESTIMATES_CLOSED_MS);
+        // Leaving the page ends its edits, so the queue goes on (sendBeacon survives the unload)
+        window.addEventListener("pagehide", () => {
+            for (const s of editSessions.values()) {
+                if (s.token) navigator.sendBeacon(api.apiURL("/queue_workbench/freeze"), JSON.stringify({ token: s.token, on: false }));
+            }
+        });
 
         // Hide panel initially
         const panel = document.getElementById("qm-panel");

@@ -4,6 +4,8 @@
 
 - Notifications: the *Open in browser* button is now *Save*. It downloads the finished file to the phone (its `Download` folder) instead of showing it in a browser tab, and clears the notification.
 - Editing a queued run can carry the change back into its workflow: *Also update workflow* in the Update dialog patches the workflow's open tab (marked modified) or, when it isn't open, its saved file. Values changed in the workflow since queueing are listed so you can choose which to overwrite.
+- Pause keeps the queue as it is: runs are no longer taken out and re-submitted, so their order never changes, they stay visible (also in ComfyUI's own queue) and can be edited, moved or deleted while paused. Every device sees the same paused state.
+- Editing a queued run freezes the queue until you update or cancel, so the run can't start while you edit it. An edit left open on another device shows as *FROZEN — editing #n* with *▶ Unfreeze*.
 
 ## 1.1.0
 

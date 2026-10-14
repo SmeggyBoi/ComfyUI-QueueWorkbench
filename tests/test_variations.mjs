@@ -34,6 +34,9 @@ const app = { registerExtension() {}, extensionManager: { toast: { add: t => toa
 const { rerollSeeds, variationBody, variationCountFrom, queueVariations, detailHtml, groupInfo } = new Function("app", "api",
     src + "\nreturn { rerollSeeds, variationBody, variationCountFrom, queueVariations, detailHtml, groupInfo };")(app, api);
 
+// The panel refreshed after the last post (it fetches /queue alongside the freeze state)
+const refreshed = () => calls.slice(calls.lastIndexOf("/prompt")).includes("/queue");
+
 function server(reply = () => OK) {
     calls.length = 0;
     posted.length = 0;
@@ -247,7 +250,7 @@ test("variations of a finished run: its full entry first, then N posts in a row,
         assert.ok(body.prompt["3"].inputs.seed <= 2 ** 31 - 1, "fits 32-bit-capped seed inputs");
     }
     assert.deepEqual(toasts.map(t => [t.severity, t.summary]), [["success", "Queued 3 variations of Wf"]]);
-    assert.equal(calls.at(-1), "/queue", "the panel refreshes");
+    assert.ok(refreshed(), "the panel refreshes");
     server();
     await queueVariations(listed, historyRun(listed), 1);
     assert.equal(toasts[0].summary, "Queued 1 variation of Wf");
@@ -261,7 +264,7 @@ test("a rejected variation stops the series and says how many were queued", asyn
     assert.equal(posted.length, 2, "nothing after the rejection");
     assert.deepEqual(toasts.map(t => [t.severity, t.summary, t.detail]), [["error", "Couldn't queue variation 2 of 4",
         "KSampler: Value bigger than max (seed, 562949953421312 > 4294967295) — 1 of 4 queued"]]);
-    assert.equal(calls.at(-1), "/queue", "the one that got queued shows up");
+    assert.ok(refreshed(), "the one that got queued shows up");
     server(() => rejected);
     await queueVariations(wfRun(), null, 2);
     assert.equal(posted.length, 1);
@@ -277,7 +280,7 @@ test("node_errors on a 200 answer: the series stops, that run still counts as qu
     assert.equal(posted.length, 2, "nothing after the partially-queued run");
     assert.deepEqual(toasts.map(t => [t.severity, t.summary, t.detail]), [["warn", "Variation 2 of 4 skipped some outputs",
         "KSampler: Value bigger than max (seed, 4294967296 > 4294967295) — 2 of 4 queued"]]);
-    assert.equal(calls.at(-1), "/queue", "it was queued, so the panel refreshes");
+    assert.ok(refreshed(), "it was queued, so the panel refreshes");
 });
 
 test("a network failure mid-series: the toast says how many queued, no more posts follow", async () => {
@@ -286,7 +289,7 @@ test("a network failure mid-series: the toast says how many queued, no more post
     assert.equal(posted.length, 2, "the attempt that failed still counts as a post");
     assert.deepEqual(toasts.map(t => [t.severity, t.summary, t.detail]),
         [["error", "Couldn't queue variation 2 of 3", "Failed to fetch — 1 of 3 queued"]]);
-    assert.equal(calls.at(-1), "/queue", "the one that queued shows up");
+    assert.ok(refreshed(), "the one that queued shows up");
     server(() => { throw new Error("Failed to fetch"); });
     await queueVariations(wfRun(), null, 2);
     assert.ok(!calls.includes("/queue"), "nothing queued yet, nothing to refresh");
