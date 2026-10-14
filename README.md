@@ -22,7 +22,8 @@ runs of the same workflow apart, and fix a queued run without re-queueing it.
   change anything, and press **Update queued run**. The run keeps its place in
   the queue. If other queued runs of the same workflow still have the old values,
   you can copy the change into them in one go. Each keeps its own seed, image
-  and other values.
+  and other values. The change can also go back into the workflow you queued
+  from: its open tab (you save it) or, when it isn't open, its saved file.
 - **Reorder, pause, delete.** Drag rows to reorder (runs keep their IDs), pause
   the queue while the current run finishes, delete single runs.
 - **History.** The *History* tab lists the last 200 finished runs, newest first,
@@ -85,6 +86,7 @@ red banner at the top tells you so.
 | See everything about a run | Hover a row (desktop) or tap it (touch) |
 | Open a run as a normal copy | Click its short ID |
 | Edit a run in place | ✎ on the row or *✎ Edit* in the detail card, change the graph, then **Update queued run** (or **Cancel**) |
+| Keep an edit in the workflow too | Tick *Also update workflow* in the Update dialog. Values you changed in the workflow since queueing are listed; tick the ones to overwrite. The open tab is marked modified (save it yourself); a closed workflow's file is saved. |
 | Reorder | Drag a row onto another. On a phone: long-press ⠿ and drag, or ⤒ Move to top in the run's detail |
 | Pause / resume | *Pause* in the panel header. The running job finishes; nothing else starts until you resume. |
 | Restore after a restart | *Saved from previous session* section: restore one or all, or discard |
@@ -201,6 +203,9 @@ including this panel and its live preview.
   inside a legacy group node.
 - A seed fed from a plain Int *Primitive* node isn't re-rolled: its input is
   named `value`, not `seed`. Name the seed input or use a seed node instead.
+- *Also update workflow* patches a tab that isn't the active one in memory only;
+  reload the page before visiting it and the change is gone (the queued run keeps
+  it). The same workflow open on another device updates when it is reloaded there.
 
 ## Privacy
 

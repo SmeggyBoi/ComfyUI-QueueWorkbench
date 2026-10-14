@@ -5,8 +5,11 @@ import fs from "node:fs";
 const src = fs.readFileSync(new URL("../web/queue_workbench.js", import.meta.url), "utf8").replace(/^import .*$/mg, "");
 globalThis.window   = { matchMedia: () => ({ matches: true }) };
 globalThis.document = { getElementById: () => null, addEventListener() {}, removeEventListener() {} };
-const { diffPrompts, diffWidgets, patchRun, changeLabel, editedRunPayload, editTabName, siblingCandidates, validationMessage, resubmitBody, detailHtml, groupInfo, slotShifts, markDropTarget, trackDropTarget, reorderedIds, onDragStart, onDragEnd, sourceWorkflow, carryBack } = new Function("app", "api",
-    src + "\nreturn { diffPrompts, diffWidgets, patchRun, changeLabel, editedRunPayload, editTabName, siblingCandidates, validationMessage, resubmitBody, detailHtml, groupInfo, slotShifts, markDropTarget, trackDropTarget, reorderedIds, onDragStart, onDragEnd, sourceWorkflow, carryBack };")({ registerExtension() {} }, { addEventListener() {} });
+// Mutable stand-ins: tests give app a workflow store / toast and api a fetchApi
+const app = { registerExtension() {} };
+const api = { addEventListener() {} };
+const { diffPrompts, diffWidgets, patchRun, changeLabel, editedRunPayload, editTabName, siblingCandidates, validationMessage, resubmitBody, detailHtml, groupInfo, slotShifts, markDropTarget, trackDropTarget, reorderedIds, onDragStart, onDragEnd, sourceWorkflow, carryBack, widgetChangeName, updateLabel, carryHtml, carryToWorkflow, refreshWorkflowNames } = new Function("app", "api",
+    src + "\nreturn { diffPrompts, diffWidgets, patchRun, changeLabel, editedRunPayload, editTabName, siblingCandidates, validationMessage, resubmitBody, detailHtml, groupInfo, slotShifts, markDropTarget, trackDropTarget, reorderedIds, onDragStart, onDragEnd, sourceWorkflow, carryBack, widgetChangeName, updateLabel, carryHtml, carryToWorkflow, refreshWorkflowNames };")(app, api);
 
 const TEXT = "summary: a woman walks through a sunlit flower shop, smiling at the camera";
 function run(id, { seed = 1, text = TEXT, steps = 12, lora = true } = {}) {
@@ -275,9 +278,129 @@ test("a seed the workflow re-rolled since queueing is a conflict", () => {
     assert.equal(r.workflow.nodes[1].widgets_values[0], 987654);
 });
 
+// The Steps / PROMPTS edit of a run "a" (prompt text longer than 30 characters, so it is named
+// by its node title alone, like real prompts)
+const NEW_TEXT = TEXT.replace("walks", "strolls");
+function stepsAndText() {
+    const a       = stamped(run("a", { steps: 12 }));
+    const after   = edited(a, w => { w.nodes[0].widgets_values[0] = NEW_TEXT; w.nodes[2].widgets_values[0] = 30; });
+    const prompt  = structuredClone(a[2]);
+    prompt["5"].inputs.text = NEW_TEXT;
+    prompt["24"].inputs.value = 30;
+    const { changes } = diffPrompts(a[2], prompt);
+    const widgetChanges = diffWidgets(a[3].extra_pnginfo.workflow, after[3].extra_pnginfo.workflow);
+    return { a, prompt, changes, widgetChanges };
+}
+
+test("widget changes take the name of their prompt change, others their node title", () => {
+    const { a, prompt, changes, widgetChanges } = stepsAndText();
+    const wf = a[3].extra_pnginfo.workflow;
+    assert.deepEqual(widgetChanges.map(c => widgetChangeName(c, changes, prompt, wf)), ["PROMPTS", "Steps"]);
+    const control = { key: "root:20", index: "1", old: "randomize", new: "fixed" };
+    wf.nodes[1].title = "EasySeed";
+    assert.equal(widgetChangeName(control, changes, prompt, wf), "EasySeed");
+});
+
+test("primary button label follows the ticks", () => {
+    assert.equal(updateLabel(3, "#3", true), "Update 3 runs + workflow");
+    assert.equal(updateLabel(1, "#3", true), "Update run #3 + workflow");
+    assert.equal(updateLabel(3, "#3", false), "Update 3 runs");
+    assert.equal(updateLabel(1, "#3", false), "Update run #3");
+});
+
+test("the workflow section: target, conflict rows unticked and disabled with the box off, missing names, escaped", () => {
+    const { a, prompt, changes, widgetChanges } = stepsAndText();
+    const source = structuredClone(a[3].extra_pnginfo.workflow);
+    source.nodes[2].widgets_values[0] = 25;
+    source.nodes = source.nodes.filter(n => n.id !== 5);                  // PROMPTS node deleted
+    const result = carryBack(source, widgetChanges);
+    const names  = new Map(widgetChanges.map(c => [`${c.key}|${c.index}`, widgetChangeName(c, changes, prompt, a[3].extra_pnginfo.workflow)]));
+    const carry  = { name: "Long <Videos>", where: "open tab", result, names };
+    const off = carryHtml(carry, false), on = carryHtml(carry, true);
+    assert.ok(off.includes("Also update workflow <b>Long &#60;Videos&#62;</b>"), off);
+    assert.ok(off.includes("(open tab)"));
+    assert.ok(off.includes("Steps: workflow has 25 → set 30"));
+    assert.ok(off.includes("Not in the workflow anymore: PROMPTS"));
+    assert.ok(!/class="qm-carry"[^>]*checked/.test(off) && /class="qm-carry"[^>]*checked/.test(on));
+    assert.ok(/qm-carry-overwrite[^>]*disabled/.test(off) && !/qm-carry-overwrite[^>]*disabled/.test(on));
+    assert.ok(!/qm-carry-overwrite[^>]*checked/.test(on), "conflicts start unticked");
+});
+
+// A workflow-store stand-in for one saved file: load({ force }) reads `disk` (a leftover draft
+// applies on a normal load, like ComfyUI's), save() records what would be written
+function savedWorkflow(disk, { draft = false, failSave = false } = {}) {
+    return {
+        isLoaded: false, isModified: false, changeTracker: null, saved: null, loads: [],
+        get activeState() { return this.changeTracker?.activeState ?? null; },
+        async load({ force = false } = {}) {
+            this.loads.push(force);
+            this.isLoaded = true;
+            this.changeTracker = { activeState: structuredClone(disk) };
+            this.isModified = draft && !force;
+        },
+        async save() { if (failSave) throw new Error("403 Forbidden"); this.saved = structuredClone(this.changeTracker.activeState); },
+        unload() { this.isLoaded = false; this.changeTracker = null; },
+    };
+}
+function useStore(store) {
+    const toasts = [];
+    app.extensionManager = { workflow: store, toast: { add: t => toasts.push(t) } };
+    return toasts;
+}
+
+test("carrying back into an open tab replaces its graph and marks it modified; nothing is saved", async () => {
+    const { a, widgetChanges } = stepsAndText();
+    const tab = { path: "workflows/Long Videos.json", filename: "Long Videos", isModified: false,
+        changeTracker: { activeState: structuredClone(a[3].extra_pnginfo.workflow) },
+        get activeState() { return this.changeTracker.activeState; } };
+    useStore({ openWorkflows: [tab], getWorkflowByPath: () => undefined });
+    assert.equal(await carryToWorkflow(a, widgetChanges, new Set()), "unsaved tab");
+    assert.equal(tab.activeState.nodes[2].widgets_values[0], 30);
+    assert.equal(tab.activeState.nodes[0].widgets_values[0], NEW_TEXT);
+    assert.equal(tab.isModified, true);
+});
+
+test("a saved file is loaded fresh, patched against what it holds now, and saved", async () => {
+    const { a, widgetChanges } = stepsAndText();
+    const disk = structuredClone(a[3].extra_pnginfo.workflow);
+    disk.nodes[2].widgets_values[0] = 25;                                  // changed on another device meanwhile
+    const wf = savedWorkflow(disk);
+    useStore({ openWorkflows: [], getWorkflowByPath: p => p === "workflows/sub/Long Videos.json" ? wf : undefined });
+    api.fetchApi = async () => ({ ok: true, json: async () => ({ names: { wf: ["sub/Long Videos.json"] } }) });
+    await refreshWorkflowNames();
+    assert.equal(await carryToWorkflow(a, widgetChanges, new Set()), "saved");
+    assert.deepEqual(wf.loads, [false, true]);
+    assert.equal(wf.saved.nodes[0].widgets_values[0], NEW_TEXT);
+    assert.equal(wf.saved.nodes[2].widgets_values[0], 25, "an unticked conflict keeps the workflow's value");
+    assert.equal(wf.isLoaded, false, "unloaded again: it wasn't loaded before");
+});
+
+test("a closed workflow with a leftover draft is left alone", async () => {
+    const { a, widgetChanges } = stepsAndText();
+    const wf = savedWorkflow(structuredClone(a[3].extra_pnginfo.workflow), { draft: true });
+    const toasts = useStore({ openWorkflows: [], getWorkflowByPath: () => wf });
+    api.fetchApi = async () => ({ ok: true, json: async () => ({ names: { wf: ["Long Videos.json"] } }) });
+    await refreshWorkflowNames();
+    assert.equal(await carryToWorkflow(a, widgetChanges, new Set()), null);
+    assert.equal(wf.saved, null);
+    assert.deepEqual(wf.loads, [false]);
+    assert.equal(wf.isLoaded, false);
+    assert.deepEqual(toasts.map(t => [t.severity, t.summary, t.detail]), [["warn", "Long Videos has unsaved changes", "Open it and update it there."]]);
+});
+
+test("a failed save still unloads the workflow and reports the error", async () => {
+    const { a, widgetChanges } = stepsAndText();
+    const wf = savedWorkflow(structuredClone(a[3].extra_pnginfo.workflow), { failSave: true });
+    useStore({ openWorkflows: [], getWorkflowByPath: () => wf });
+    api.fetchApi = async () => ({ ok: true, json: async () => ({ names: { wf: ["Long Videos.json"] } }) });
+    await refreshWorkflowNames();
+    await assert.rejects(carryToWorkflow(a, widgetChanges, new Set()), /403 Forbidden/);
+    assert.equal(wf.isLoaded, false);
+});
+
 let failed = 0;
 for (const [name, fn] of tests) {
-    try { fn(); console.log(`ok   ${name}`); } catch (e) { failed++; console.log(`FAIL ${name}\n     ${e.message}`); }
+    try { await fn(); console.log(`ok   ${name}`); } catch (e) { failed++; console.log(`FAIL ${name}\n     ${e.message}`); }
 }
 console.log(`${tests.length - failed}/${tests.length} passed`);
 process.exit(failed ? 1 : 0);

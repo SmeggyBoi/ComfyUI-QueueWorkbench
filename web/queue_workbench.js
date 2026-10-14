@@ -8,7 +8,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-const BUILD = "2026-10-03k";
+const BUILD = "2026-10-14a";
 
 // Stale-JS detection (PWA caches extension JS hard): compare this bundle's BUILD
 // against the stamp the backend reads from web/queue_workbench.js ON DISK.
@@ -1279,6 +1279,104 @@ function carryBack(workflow, widgetChanges, overwrite = new Set()) {
     return { workflow: patched, applied, conflicts, missing };
 }
 
+// A widget change named like the prompt change it came with (same node, same values), else by its node
+function widgetChangeName(c, changes, prompt, workflow) {
+    const id    = c.key.split(":").pop();
+    const match = changes.find(p => (p.nodeId === id || p.nodeId.endsWith(`:${id}`)) && same(p.old, c.old) && same(p.new, c.new));
+    if (match) return changeName(match, prompt);
+    const node = workflowNodes(workflow).get(c.key);
+    return node?.title || node?.type || id;
+}
+
+function conflictLabel(name, current, c) {
+    if (typeof c.new === "string" && c.new.length > 30) return `${name} (text): the workflow has other text`;
+    return `${name}: workflow has ${fmtValue(current)} → set ${fmtValue(c.new)}`;
+}
+
+// "Update 3 runs + workflow", "Update run #3"
+const updateLabel = (runs, where, carrying) => `Update ${runs > 1 ? `${runs} runs` : `run ${where}`}${carrying ? " + workflow" : ""}`;
+
+// The Update dialog's workflow section. carry = { name, where, result: carryBack(...), names: changeId -> name }
+function carryHtml(carry, ticked) {
+    const { name, where, result, names } = carry;
+    const conflicts = result.conflicts.map(({ change, current }) => `
+        <label style="display:flex;align-items:center;gap:8px;padding:3px 0;cursor:pointer;">
+            <input type="checkbox" class="qm-carry-overwrite" data-id="${esc(changeId(change))}"${ticked ? "" : " disabled"} style="accent-color:#a78bfa;">
+            <span>${esc(conflictLabel(names.get(changeId(change)), current, change))}</span>
+        </label>`).join("");
+    const missing = [...new Set(result.missing.map(c => names.get(changeId(c))))].join(", ");
+    return `
+        <label style="display:flex;align-items:center;gap:8px;margin-top:12px;cursor:pointer;">
+            <input type="checkbox" class="qm-carry"${ticked ? " checked" : ""} style="accent-color:#a78bfa;">
+            <span>Also update workflow <b>${esc(name)}</b> <span style="color:#999;">(${esc(where)})</span></span>
+        </label>
+        <div style="margin-left:24px;">
+            ${conflicts ? `<div style="color:#999;margin-top:4px;">Changed in the workflow since you queued:</div>${conflicts}` : ""}
+            ${missing ? `<div style="color:#777;margin-top:4px;">Not in the workflow anymore: ${esc(missing)}</div>` : ""}
+        </div>`;
+}
+
+// The workflow box remembers the last choice in this browser
+function rememberedCarry() {
+    try { return localStorage.getItem("qm.carryToWorkflow") === "1"; } catch (e) { return false; }
+}
+function rememberCarry(on) {
+    try { localStorage.setItem("qm.carryToWorkflow", on ? "1" : "0"); } catch (e) { /* not remembered */ }
+}
+
+// The dialog's workflow section for an edit, or null when its workflow has nothing to take.
+// A saved file is read from disk here only; it is loaded into the store when the update applies.
+async function carryPlan(item, widgetChanges, changes, prompt) {
+    if (!widgetChanges.length) return null;
+    await refreshWorkflowNames();
+    const source = sourceWorkflow(item, workflowStore()?.openWorkflows || [], workflowNames);
+    if (!source) return null;
+    let state = source.tab?.activeState;
+    if (source.path) {
+        const res = await api.getUserData(source.path);
+        if (!res.ok) return null;
+        state = await res.json();
+    }
+    const result = carryBack(state, widgetChanges);
+    if (!result.applied.length && !result.conflicts.length) return null;
+    const names = new Map(widgetChanges.map(c => [changeId(c), widgetChangeName(c, changes, prompt, state)]));
+    return { name: workflowName(item), where: source.tab ? "open tab" : `saved file ${source.path}`, result, names };
+}
+
+// Writes the edit into the run's workflow, checked again against what it holds now: an open tab
+// gets the new graph and is marked modified (saving stays the user's call); a saved file is
+// loaded fresh, patched and saved, unless a leftover draft holds unsaved changes.
+async function carryToWorkflow(item, widgetChanges, overwrite) {
+    const store  = workflowStore();
+    const name   = workflowName(item);
+    const source = sourceWorkflow(item, store.openWorkflows || [], workflowNames);
+    if (source?.tab) {
+        const { workflow, applied } = carryBack(source.tab.activeState, widgetChanges, overwrite);
+        if (!applied.length) return null;
+        source.tab.changeTracker.activeState = workflow;
+        source.tab.isModified = true;
+        return "unsaved tab";
+    }
+    const wf = source && store.getWorkflowByPath(source.path);
+    if (!wf) return null;
+    const wasLoaded = wf.isLoaded;
+    try {
+        await wf.load();
+        if (wf.isModified) {
+            toast("warn", `${name} has unsaved changes`, "Open it and update it there.");
+            return null;
+        }
+        await wf.load({ force: true });
+        const { workflow, applied } = carryBack(wf.activeState, widgetChanges, overwrite);
+        if (!applied.length) return null;
+        wf.changeTracker.activeState = workflow;
+        await wf.save();
+        return "saved";
+    } finally {
+        if (!wasLoaded) wf.unload();
+    }
+}
+
 // "Steps", "PROMPTS", "KSampler › cfg" or a LoRA name
 function changeName(c, prompt) {
     if (c.new && typeof c.new === "object" && "lora" in c.new) return loraName(c.new.lora);
@@ -1288,15 +1386,14 @@ function changeName(c, prompt) {
     return c.input === "value" || (typeof c.new === "string" && c.new.length > 30) ? title : `${title} › ${c.input}`;
 }
 
+// A value as the change list shows it: LoRAs as their strength or "off"
+const fmtValue = v => v && typeof v === "object" && "lora" in v ? (v.on ? fmtStrength(v.strength) : "off")
+    : typeof v === "number" ? fmtNumber(v) : typeof v === "string" ? v : JSON.stringify(v);
+
 function changeLabel(c, prompt) {
     const name = changeName(c, prompt);
-    if (c.new && typeof c.new === "object" && "lora" in c.new) {
-        const state = v => v?.on ? fmtStrength(v.strength) : "off";
-        return `${name}: ${state(c.old)} → ${state(c.new)}`;
-    }
     if (typeof c.new === "string" && c.new.length > 30) return `${name} (text)`;
-    const fmt = v => typeof v === "number" ? fmtNumber(v) : typeof v === "string" ? v : JSON.stringify(v);
-    return `${name}: ${fmt(c.old)} → ${fmt(c.new)}`;
+    return `${name}: ${fmtValue(c.old)} → ${fmtValue(c.new)}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1423,8 +1520,9 @@ function showDialog(title, bodyHtml, buttons, cancelValue = null, onMount = null
     });
 }
 
-// Resolves to the checked siblings, [] for "Only #n", or null for "Back to editing"
-function chooseSiblings(session, prompt, changes, siblings) {
+// Resolves to null for "Back to editing", else { siblings, carry: null | { overwrite } }.
+// "Only #n" updates the run alone; carry = the workflow section from carryPlan, or null.
+function chooseUpdate(session, prompt, changes, siblings, carry) {
     const info  = groupInfo(pendingSorted());
     const where = queuePosition(session.promptId);
     const rows  = siblings.map((s, i) => {
@@ -1438,20 +1536,31 @@ function chooseSiblings(session, prompt, changes, siblings) {
                 <span style="color:#999;font-size:12px;min-width:0;">gets ${esc(gets)}</span>
             </label>`;
     }).join("");
+    const ticked = !!carry && rememberedCarry();
     const body = `
         <div style="color:#999;">You changed</div>
         <ul style="margin:4px 0 12px 18px;padding:0;color:#ddd;">${changes.map(c => `<li>${esc(changeLabel(c, prompt))}</li>`).join("")}</ul>
-        <div style="color:#999;margin-bottom:4px;">Also apply to the queued runs of this workflow that still have the old values</div>
-        <div style="max-height:40vh;overflow-y:auto;">${rows}</div>`;
-    const checked = dlg => siblings.filter((s, i) => dlg.querySelector(`input[data-i="${i}"]`).checked);
-    const count   = n => `Update ${n} run${n > 1 ? "s" : ""}`;
+        ${siblings.length ? `
+            <div style="color:#999;margin-bottom:4px;">Also apply to the queued runs of this workflow that still have the old values</div>
+            <div style="max-height:40vh;overflow-y:auto;">${rows}</div>` : ""}
+        ${carry ? carryHtml(carry, ticked) : ""}`;
+    const checked  = dlg => siblings.filter((s, i) => dlg.querySelector(`input[data-i="${i}"]`).checked);
+    const carrying = dlg => !!carry && dlg.querySelector(".qm-carry").checked;
+    const chosen   = dlg => {
+        if (carry) rememberCarry(carrying(dlg));
+        const overwrite = new Set([...dlg.querySelectorAll(".qm-carry-overwrite")].filter(b => b.checked).map(b => b.dataset.id));
+        return { siblings: checked(dlg), carry: carrying(dlg) ? { overwrite } : null };
+    };
     return showDialog(`Update queued run ${where}`, body, [
         { label: "Back to editing", value: () => null },
-        { label: `Only ${where}`, value: () => [] },
-        { label: count(siblings.length + 1), primary: true, value: checked },
+        { label: `Only ${where}`, value: () => ({ siblings: [], carry: null }) },
+        { label: updateLabel(siblings.length + 1, where, ticked), primary: true, value: chosen },
     ], null, dlg => {
         const primary = dlg.querySelector("button[data-primary]");
-        dlg.addEventListener("change", () => { primary.textContent = count(checked(dlg).length + 1); });
+        dlg.addEventListener("change", () => {
+            dlg.querySelectorAll(".qm-carry-overwrite").forEach(b => { b.disabled = !carrying(dlg); });
+            primary.textContent = updateLabel(checked(dlg).length + 1, where, carrying(dlg));
+        });
     });
 }
 
@@ -1509,14 +1618,15 @@ async function updateQueuedRun(session) {
         const siblings = structural ? [] : siblingCandidates(current, pendingSorted(), new Set(editSessions.keys()))
             .map(it => ({ item: it, patch: patchRun(it, changes, widgetChanges) }))
             .filter(s => s.patch);
-        let chosen = [];
-        if (siblings.length) {
-            chosen = await chooseSiblings(session, output, changes, siblings);
-            if (chosen === null) return;
+        const carry = structural ? null : await carryPlan(current, widgetChanges, changes, output);
+        let choice  = { siblings: [], carry: null };
+        if (siblings.length || carry) {
+            choice = await chooseUpdate(session, output, changes, siblings, carry);
+            if (choice === null) return;
         }
         const edited = editedRunPayload(current, output, workflow, changes, widgetChanges, structural);
         const items  = [{ prompt_id: session.promptId, prompt: edited.prompt, workflow: edited.workflow },
-            ...chosen.map(s => ({ prompt_id: s.item[1], prompt: s.patch.prompt, workflow: s.patch.workflow }))];
+            ...choice.siblings.map(s => ({ prompt_id: s.item[1], prompt: s.patch.prompt, workflow: s.patch.workflow }))];
         const res  = await api.fetchApi("/queue_workbench/replace", {
             method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ items }),
         });
@@ -1532,10 +1642,19 @@ async function updateQueuedRun(session) {
         const others  = data.replaced.length - 1;
         const skipped = data.not_pending.length;
         const notes   = [
-            structural && "The graph structure changed, so other runs were left as they were.",
+            structural && "The graph structure changed, so the other runs and the workflow were left as they were.",
             skipped && `${skipped} selected run${skipped > 1 ? "s" : ""} had already started and kept the old version.`,
         ].filter(Boolean).join(" ");
-        toast("success", `Updated run ${queuePosition(session.promptId)}${others ? ` and ${others} other${others > 1 ? "s" : ""}` : ""}`, notes || undefined);
+        let carried = "";
+        if (choice.carry) {
+            try {
+                const done = await carryToWorkflow(current, widgetChanges, choice.carry.overwrite);
+                if (done) carried = ` · ${workflowName(current)} updated (${done})`;
+            } catch (e) {
+                toast("error", `Couldn't save workflow ${workflowName(current)}`, e.message);
+            }
+        }
+        toast("success", `Updated run ${queuePosition(session.promptId)}${others ? ` and ${others} other${others > 1 ? "s" : ""}` : ""}${carried}`, notes || undefined);
         await closeEditTab(session);
         await refreshQueue();
     } finally {
