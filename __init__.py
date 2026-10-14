@@ -20,7 +20,7 @@ import folder_paths
 from aiohttp import web
 from server import PromptServer
 
-from . import download, estimates, oom_retry, summary
+from . import download, estimates, freeze, oom_retry, summary
 
 WEB_DIRECTORY = "./web"
 NODE_CLASS_MAPPINGS = {}
@@ -360,6 +360,16 @@ try:
     setup_persistence(server)
 except Exception:
     print(f"[QueueWorkbench] persistence setup error:\n{traceback.format_exc()}")
+
+# ---------------------------------------------------------------------------
+# Freeze the queue: Pause, and while a queued run is edited (see freeze.py).
+# Installed after persistence, so its get() wrapper (the DB mirror) runs inside the gate.
+# ---------------------------------------------------------------------------
+try:
+    freeze.install(server.prompt_queue)
+    freeze.register_routes(server)
+except Exception:
+    print(f"[QueueWorkbench] freeze setup error:\n{traceback.format_exc()}")
 
 # ---------------------------------------------------------------------------
 # Edit queued runs in place + in-place reorder (see queue_edit.py)

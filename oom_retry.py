@@ -9,7 +9,7 @@ Never while the queue is paused, never a retry of a retry.
 import traceback
 import uuid
 
-from . import persistence
+from . import freeze
 
 _OOM_TIP = "ran out of memory on your GPU"   # part of ComfyUI's OOM tip in exception_message
 
@@ -27,7 +27,7 @@ def retry_blocker(item):
     """Why a failed run is not retried, or None if it may be."""
     if (item[3] or {}).get("qm_retry_of"):
         return "already a retry"
-    if persistence.has_held():
+    if freeze.paused():
         return "queue paused"
     workflow = ((item[3] or {}).get("extra_pnginfo") or {}).get("workflow") or {}
     if not (workflow.get("extra") or {}).get("qm_queued_at"):

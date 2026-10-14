@@ -2,7 +2,7 @@
 ComfyUI Queue Workbench — persistence layer
 -------------------------------------------
 Mirrors ComfyUI's in-memory prompt queue to a small local SQLite database so
-that pending (and paused/held) workflows survive a backend shutdown/crash.
+that pending workflows survive a backend shutdown/crash.
 
 ComfyUI keeps its queue entirely in RAM (execution.PromptQueue), so a restart
 normally discards every unprocessed job. We keep a live mirror on disk by
@@ -17,8 +17,8 @@ ComfyUI itself strips it from /queue and history, and it is stale after restart.
 
 row origin values:
   'queue' — live mirror of the current in-RAM queue (this session)
-  'held'  — items the Queue Workbench paused (deleted from the native queue,
-            held client-side); persisted so a pause+shutdown doesn't lose them
+  'held'  — paused items of versions before the server-side freeze; rolled over
+            to 'saved' at startup like 'queue'
   'saved' — backlog from a previous session, awaiting manual restore/discard
 
 Finished runs are also kept (table `history`, newest HISTORY_LIMIT plus the pinned
@@ -448,12 +448,6 @@ def delete_history(prompt_ids):
         return conn.execute(f"DELETE FROM history WHERE prompt_id IN ({placeholders})", prompt_ids).rowcount
 
 
-def has_held():
-    """True while the panel holds paused runs, i.e. the queue is paused."""
-    with _db_lock, _connect() as conn:
-        return conn.execute("SELECT 1 FROM saved_jobs WHERE origin='held' LIMIT 1").fetchone() is not None
-
-
 def recent_durations(workflow, workflow_id, sig=None, limit=5):
     """duration_ms of a workflow's newest `limit` successful runs, newest first. Matched by name
     when the run has one, else by GUI workflow id among the unnamed runs; with `sig`, only runs
@@ -576,41 +570,6 @@ def _register_routes(server):
                     ids,
                 )
         return web.json_response({"discarded": cur.rowcount})
-
-    @routes.post("/queue_workbench/held")
-    async def set_held(request):
-        """Replace the persisted set of paused/held items. Body
-        {"items": [ [number, prompt_id, prompt, extra_data, outputs], ... ]}.
-        Called by the frontend when the queue is paused."""
-        try:
-            body = await request.json()
-        except Exception:
-            body = {}
-        items = body.get("items", [])
-        now = int(time.time())
-        with _db_lock, _connect() as conn:
-            conn.execute("DELETE FROM saved_jobs WHERE origin='held'")
-            for it in items:
-                try:
-                    number, prompt_id, payload = _strip_sensitive(it)
-                    if prompt_id is None:
-                        continue
-                    conn.execute(
-                        "INSERT OR REPLACE INTO saved_jobs "
-                        "(prompt_id, number, origin, item_json, saved_at) "
-                        "VALUES (?,?, 'held', ?, ?)",
-                        (prompt_id, number, json.dumps(payload), now),
-                    )
-                except Exception:
-                    pass
-        return web.json_response({"held": len(items)})
-
-    @routes.post("/queue_workbench/held/clear")
-    async def clear_held(request):
-        """Clear the persisted held set (called on resume)."""
-        with _db_lock, _connect() as conn:
-            conn.execute("DELETE FROM saved_jobs WHERE origin='held'")
-        return web.json_response({"ok": True})
 
     @routes.get("/queue_workbench/history")
     async def get_history(request):

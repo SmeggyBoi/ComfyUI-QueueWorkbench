@@ -10,12 +10,12 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
-# oom_retry.py inside its own stand-in package with persistence stubbed (test_queue_edit.py uses "qm")
+# oom_retry.py inside its own stand-in package with freeze stubbed (test_queue_edit.py uses "qm")
 _pkg = types.ModuleType("qm_oom")
 _pkg.__path__ = [str(ROOT)]
 sys.modules["qm_oom"] = _pkg
 held = [False]
-sys.modules["qm_oom.persistence"] = types.SimpleNamespace(has_held=lambda: held[0])
+sys.modules["qm_oom.freeze"] = types.SimpleNamespace(paused=lambda: held[0])
 oom_retry = importlib.import_module("qm_oom.oom_retry")
 
 OOM = ("execution_error", {"prompt_id": "run", "node_type": "KSampler", "exception_type": "torch.OutOfMemoryError",
