@@ -11,8 +11,8 @@ globalThis.window   = { matchMedia: () => ({ matches: true }), innerWidth: 1000,
 globalThis.document = { getElementById: () => null, addEventListener() {}, removeEventListener() {},
                         createElement: () => fake(), body: { appendChild() {} }, querySelectorAll: () => [] };
 const api = { addEventListener() {} };
-const { freezeTagHtml, queueTexts, freezeNote, freezeFor } = new Function("app", "api",
-    src + "\nreturn { freezeTagHtml, queueTexts, freezeNote, freezeFor };")({ registerExtension() {} }, api);
+const { freezeTagHtml, queueTexts, freezeNote, freezeFor, panelRight } = new Function("app", "api",
+    src + "\nreturn { freezeTagHtml, queueTexts, freezeNote, freezeFor, panelRight };")({ registerExtension() {} }, api);
 
 const pending = ["a", "b", "c"].map((id, i) => [i, id, {}, {}, []]);
 const tests = [];
@@ -63,6 +63,11 @@ test("freezing for an edit: frozen, already started (409), or an older backend (
         assert.equal(await freezeFor("b", "t1"), expected);
     }
     assert.deepEqual(posted[0], ["/queue_workbench/freeze", { edit: "b", token: "t1", on: true }]);
+});
+
+test("the panel sits under the 🗂️ button but never past the left edge of a narrow screen", () => {
+    assert.equal(panelRight(1440, 1300, 420), 140);    // desktop: right-aligned with the button
+    assert.equal(panelRight(412, 290, 380), 24);       // phone: the button sits far left, the panel moves right
 });
 
 // A panel whose ✎ opens a tab after 50 ms (or fails to); posts = the freeze requests it sent

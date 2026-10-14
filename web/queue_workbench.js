@@ -8,7 +8,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-const BUILD = "2026-10-14c";
+const BUILD = "2026-10-14d";
 
 // Stale-JS detection (PWA caches extension JS hard): compare this bundle's BUILD
 // against the stamp the backend reads from web/queue_workbench.js ON DISK.
@@ -182,6 +182,10 @@ const TAB        = "background:none;border:none;border-bottom:2px solid transpar
 const TAB_ACTIVE = "color:#ddd;border-bottom-color:#7b5cfa;";
 const FILTER     = "background:#141414;border:1px solid #444;color:#ddd;border-radius:5px;padding:3px 6px;font-size:12px;";
 
+// The panel's right offset: under the 🗂️ button, but never past the left edge of a narrow
+// screen (on a phone the toolbar puts the button far to the left)
+const panelRight = (viewport, buttonRight, width) => Math.min(viewport - buttonRight, viewport - width - 8);
+
 function createPanel() {
     const panel = document.createElement("div");
     panel.id    = "qm-panel";
@@ -210,7 +214,7 @@ function createPanel() {
         if (!btn) return;
         const rect = btn.getBoundingClientRect();
         panel.style.top  = (rect.bottom + 8) + "px";
-        panel.style.right = (window.innerWidth - rect.right) + "px";
+        panel.style.right = panelRight(window.innerWidth, rect.right, panel.offsetWidth) + "px";
     }
     panel._reposition = repositionPanel;
 
