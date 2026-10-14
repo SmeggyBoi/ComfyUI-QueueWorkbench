@@ -1339,9 +1339,12 @@ async function carryPlan(item, widgetChanges, changes, prompt) {
     }
     const result = carryBack(state, widgetChanges);
     if (!result.applied.length && !result.conflicts.length) return null;
-    const names = new Map(widgetChanges.map(c => [changeId(c), widgetChangeName(c, changes, prompt, state)]));
+    const names = new Map(widgetChanges.map(c => [changeId(c), widgetChangeName(c, changes, prompt, item[3].extra_pnginfo.workflow)]));
     return { name: workflowName(item), where: source.tab ? "open tab" : `saved file ${source.path}`, result, names };
 }
+
+// The toast's workflow part: what the carry did, or that the workflow kept its values
+const carryNote = (name, done) => done ? ` · ${name} updated (${done})` : ` · ${name} not updated`;
 
 // Writes the edit into the run's workflow, checked again against what it holds now: an open tab
 // gets the new graph and is marked modified (saving stays the user's call); a saved file is
@@ -1360,6 +1363,9 @@ async function carryToWorkflow(item, widgetChanges, overwrite) {
     const wf = source && store.getWorkflowByPath(source.path);
     if (!wf) return null;
     const wasLoaded = wf.isLoaded;
+    // ComfyUI never clears the modified flag a draft once set on a closed workflow, so only this
+    // load may decide (it sets the flag again when it applies a leftover draft)
+    if (!wasLoaded) wf.isModified = false;
     try {
         await wf.load();
         if (wf.isModified) {
@@ -1373,7 +1379,10 @@ async function carryToWorkflow(item, widgetChanges, overwrite) {
         await wf.save();
         return "saved";
     } finally {
-        if (!wasLoaded) wf.unload();
+        if (!wasLoaded) {
+            wf.unload();
+            wf.isModified = false;
+        }
     }
 }
 
@@ -1648,8 +1657,7 @@ async function updateQueuedRun(session) {
         let carried = "";
         if (choice.carry) {
             try {
-                const done = await carryToWorkflow(current, widgetChanges, choice.carry.overwrite);
-                if (done) carried = ` · ${workflowName(current)} updated (${done})`;
+                carried = carryNote(workflowName(current), await carryToWorkflow(current, widgetChanges, choice.carry.overwrite));
             } catch (e) {
                 toast("error", `Couldn't save workflow ${workflowName(current)}`, e.message);
             }

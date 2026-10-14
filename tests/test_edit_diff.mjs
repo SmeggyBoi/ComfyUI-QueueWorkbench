@@ -8,8 +8,8 @@ globalThis.document = { getElementById: () => null, addEventListener() {}, remov
 // Mutable stand-ins: tests give app a workflow store / toast and api a fetchApi
 const app = { registerExtension() {} };
 const api = { addEventListener() {} };
-const { diffPrompts, diffWidgets, patchRun, changeLabel, editedRunPayload, editTabName, siblingCandidates, validationMessage, resubmitBody, detailHtml, groupInfo, slotShifts, markDropTarget, trackDropTarget, reorderedIds, onDragStart, onDragEnd, sourceWorkflow, carryBack, widgetChangeName, updateLabel, carryHtml, carryToWorkflow, refreshWorkflowNames } = new Function("app", "api",
-    src + "\nreturn { diffPrompts, diffWidgets, patchRun, changeLabel, editedRunPayload, editTabName, siblingCandidates, validationMessage, resubmitBody, detailHtml, groupInfo, slotShifts, markDropTarget, trackDropTarget, reorderedIds, onDragStart, onDragEnd, sourceWorkflow, carryBack, widgetChangeName, updateLabel, carryHtml, carryToWorkflow, refreshWorkflowNames };")(app, api);
+const { diffPrompts, diffWidgets, patchRun, changeLabel, editedRunPayload, editTabName, siblingCandidates, validationMessage, resubmitBody, detailHtml, groupInfo, slotShifts, markDropTarget, trackDropTarget, reorderedIds, onDragStart, onDragEnd, sourceWorkflow, carryBack, widgetChangeName, updateLabel, carryHtml, carryToWorkflow, refreshWorkflowNames, carryPlan, carryNote } = new Function("app", "api",
+    src + "\nreturn { diffPrompts, diffWidgets, patchRun, changeLabel, editedRunPayload, editTabName, siblingCandidates, validationMessage, resubmitBody, detailHtml, groupInfo, slotShifts, markDropTarget, trackDropTarget, reorderedIds, onDragStart, onDragEnd, sourceWorkflow, carryBack, widgetChangeName, updateLabel, carryHtml, carryToWorkflow, refreshWorkflowNames, carryPlan, carryNote };")(app, api);
 
 const TEXT = "summary: a woman walks through a sunlit flower shop, smiling at the camera";
 function run(id, { seed = 1, text = TEXT, steps = 12, lora = true } = {}) {
@@ -326,8 +326,9 @@ test("the workflow section: target, conflict rows unticked and disabled with the
     assert.ok(!/qm-carry-overwrite[^>]*checked/.test(on), "conflicts start unticked");
 });
 
-// A workflow-store stand-in for one saved file: load({ force }) reads `disk` (a leftover draft
-// applies on a normal load, like ComfyUI's), save() records what would be written
+// A workflow-store stand-in for one saved file: load({ force }) reads `disk`; a leftover draft
+// applies on a normal load and sets isModified, which (like ComfyUI's) nothing clears again;
+// save() records what would be written
 function savedWorkflow(disk, { draft = false, failSave = false } = {}) {
     return {
         isLoaded: false, isModified: false, changeTracker: null, saved: null, loads: [],
@@ -336,7 +337,7 @@ function savedWorkflow(disk, { draft = false, failSave = false } = {}) {
             this.loads.push(force);
             this.isLoaded = true;
             this.changeTracker = { activeState: structuredClone(disk) };
-            this.isModified = draft && !force;
+            if (draft && !force) this.isModified = true;
         },
         async save() { if (failSave) throw new Error("403 Forbidden"); this.saved = structuredClone(this.changeTracker.activeState); },
         unload() { this.isLoaded = false; this.changeTracker = null; },
@@ -386,6 +387,44 @@ test("a closed workflow with a leftover draft is left alone", async () => {
     assert.deepEqual(wf.loads, [false]);
     assert.equal(wf.isLoaded, false);
     assert.deepEqual(toasts.map(t => [t.severity, t.summary, t.detail]), [["warn", "Long Videos has unsaved changes", "Open it and update it there."]]);
+    assert.equal(wf.isModified, false, "closed again without a stale modified flag");
+});
+
+test("a stale modified flag on a closed workflow (closed earlier with \"close anyway\") doesn't block the carry", async () => {
+    const { a, widgetChanges } = stepsAndText();
+    const wf = savedWorkflow(structuredClone(a[3].extra_pnginfo.workflow));
+    wf.isModified = true;                                                  // ComfyUI leaves it set after closing
+    useStore({ openWorkflows: [], getWorkflowByPath: () => wf });
+    api.fetchApi = async () => ({ ok: true, json: async () => ({ names: { wf: ["Long Videos.json"] } }) });
+    await refreshWorkflowNames();
+    assert.equal(await carryToWorkflow(a, widgetChanges, new Set()), "saved");
+    assert.equal(wf.saved.nodes[2].widgets_values[0], 30);
+    assert.equal(wf.isModified, false);
+});
+
+test("the toast says when the workflow was left as it was", () => {
+    assert.equal(carryNote("Long Videos", "saved"), " · Long Videos updated (saved)");
+    assert.equal(carryNote("Long Videos", "unsaved tab"), " · Long Videos updated (unsaved tab)");
+    assert.equal(carryNote("Long Videos", null), " · Long Videos not updated");
+});
+
+test("names in the workflow section come from the run's graph, also for nodes the workflow no longer has", async () => {
+    const a = stamped(run("a", { steps: 12 }));
+    a[3].extra_pnginfo.workflow.nodes[1].title = "EasySeed";
+    const after   = edited(a, w => { w.nodes[2].widgets_values[0] = 30; w.nodes[1].widgets_values[1] = "fixed"; });
+    const prompt  = structuredClone(a[2]);
+    prompt["24"].inputs.value = 30;
+    const { changes } = diffPrompts(a[2], prompt);
+    const widgetChanges = diffWidgets(a[3].extra_pnginfo.workflow, after[3].extra_pnginfo.workflow);
+    const state = structuredClone(a[3].extra_pnginfo.workflow);
+    state.nodes = state.nodes.filter(n => n.id !== 20);                    // seed node deleted in the workflow
+    const tab = { path: "workflows/Long Videos.json", filename: "Long Videos", isModified: false,
+        changeTracker: { activeState: state }, get activeState() { return this.changeTracker.activeState; } };
+    useStore({ openWorkflows: [tab], getWorkflowByPath: () => undefined });
+    api.fetchApi = async () => ({ ok: true, json: async () => ({ names: {} }) });
+    const carry = await carryPlan(a, widgetChanges, changes, prompt);
+    assert.equal(carry.where, "open tab");
+    assert.deepEqual(carry.result.missing.map(c => carry.names.get(`${c.key}|${c.index}`)), ["EasySeed"]);
 });
 
 test("a failed save still unloads the workflow and reports the error", async () => {
