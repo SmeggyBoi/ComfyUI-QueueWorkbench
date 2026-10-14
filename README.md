@@ -3,7 +3,9 @@
 A queue panel for ComfyUI that lets you see what's actually in your queue, tell
 runs of the same workflow apart, and fix a queued run without re-queueing it.
 
-![Queue panel with the detail card of a queued run](docs/images/detail.png)
+![Queue panel: running job with progress, queued runs with thumbnails, setting chips and start times](docs/media/01-queue-overview.gif)
+
+▶ [Watch the 2½-minute walkthrough](docs/media/walkthrough.mp4) — every feature below, on desktop and on a phone.
 
 ## Features
 
@@ -58,9 +60,43 @@ runs of the same workflow apart, and fix a queued run without re-queueing it.
 - **Optional push notification** via [ntfy](https://ntfy.sh) when a generation
   finishes, with the result attached.
 
-| Edit a queued run | Copy the change to the workflow's other runs | On a phone |
-|---|---|---|
-| ![Edit bar](docs/images/editbar.png) | ![Update dialog](docs/images/edit-dialog.png) | ![Phone layout](docs/images/phone.png) |
+## See it in action
+
+**Details of a run** — every setting, seed and the full prompt
+
+![Hover card with settings, seeds and prompt](docs/media/02-detail-card.gif)
+
+**Reorder** — drag a run; the target row lights up red and the rows slide to their new places
+
+![Drag and drop reorder](docs/media/03-reorder.gif)
+
+**Edit a queued run** — the queue freezes while you edit; copy the change to the workflow's other runs and back into the workflow
+
+![Edit in place with the queue frozen, then the Update dialog](docs/media/04-edit-freeze.gif)
+
+**Pause** — every run keeps its place and stays editable
+
+![Pause and resume](docs/media/05-pause.gif)
+
+**History and variations** — finished runs with their outputs; queue a run again with new seeds
+
+![History tab and variations](docs/media/06-history-variations.gif)
+
+**Filters and pins** — status, workflow and text search over every stored run; ☆ keeps a run
+
+![History filters and pinning](docs/media/07-filters-pin.gif)
+
+**Gallery and viewer** — one tile per run, a full-screen viewer for every output
+
+![Gallery grid and full-screen viewer](docs/media/08-gallery-viewer.gif)
+
+**Compare two runs** — outputs side by side, the settings that differ, a word-level prompt diff
+
+![Compare view](docs/media/09-compare.gif)
+
+**On a phone** — long-press ⠿ to reorder, tap a run for its details, swipe through outputs
+
+![Phone: drag, details, gallery](docs/media/10-phone.gif)
 
 ## Installation
 
