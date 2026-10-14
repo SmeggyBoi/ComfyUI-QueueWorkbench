@@ -68,14 +68,19 @@ def clear_edits():
 
 def install(prompt_queue):
     """Gate the worker's get(): while frozen it takes nothing and returns None once its timeout
-    passes, as for an empty queue. It waits in slices of at most 1 s, so an edited run that is
-    deleted lets the queue go on without anyone setting the event."""
+    passes, as for an empty queue, or at once when a flag (ComfyUI's /free) waits for the worker.
+    It waits in slices of at most 1 s, so an edited run that is deleted lets the queue go on
+    without anyone setting the event."""
     global _queue
     _queue = prompt_queue
-    orig_put, orig_get = prompt_queue.put, prompt_queue.get
+    orig_put, orig_get, orig_set_flag = prompt_queue.put, prompt_queue.get, prompt_queue.set_flag
 
     def put(item):
         orig_put(item)
+        _changed.set()
+
+    def set_flag(name, data):
+        orig_set_flag(name, data)
         _changed.set()
 
     def get(timeout=None):
@@ -86,6 +91,8 @@ def install(prompt_queue):
                     taken = orig_get(timeout=0)
                     if taken is not None:
                         return taken
+            if prompt_queue.flags:
+                return None
             left = None if deadline is None else deadline - time.monotonic()
             if left is not None and left <= 0:
                 return None
@@ -94,6 +101,7 @@ def install(prompt_queue):
 
     prompt_queue.put = put
     prompt_queue.get = get
+    prompt_queue.set_flag = set_flag
 
 
 def register_routes(server):

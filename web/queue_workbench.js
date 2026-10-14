@@ -1397,6 +1397,7 @@ function changeLabel(c, prompt) {
 let canEdit        = false;       // backend has /queue_workbench/replace (needs a ComfyUI restart after install)
 const editSessions = new Map();   // prompt_id -> { promptId, item, path, name, baseline, token }
 let editBusy       = false;
+const openingEdits = new Set();   // prompt_ids between ✎'s freeze and its session (a double click opens one tab)
 let lastBarRefresh = 0;
 
 const BTN         = "background:#333;border:1px solid #444;color:#ddd;border-radius:5px;padding:5px 12px;cursor:pointer;font-size:12px;";
@@ -1450,37 +1451,45 @@ async function editQueuedRun(item) {
         toast("info", "Already open for editing", `Switch to the tab "${open.name}".`);
         return;
     }
+    if (openingEdits.has(item[1])) return;
     const workflow = item[3]?.extra_pnginfo?.workflow;
     if (!workflow) {
         toast("warn", "Can't edit this run", "It was queued without a workflow, for example by a script.");
         return;
     }
+    openingEdits.add(item[1]);
     // Freeze first: the run must not start while it is being edited
     const token = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    const held  = await freezeFor(item[1], token);
-    if (held === "started") {
-        toast("warn", "This run has already started", "It can't be edited anymore.");
-        await refreshQueue();
-        return;
+    let held = null;
+    try {
+        held = await freezeFor(item[1], token);
+        if (held === "started") {
+            toast("warn", "This run has already started", "It can't be edited anymore.");
+            await refreshQueue();
+            return;
+        }
+        const name = editTabName(item, queuePosition(item[1]));
+        hideDetailCard();
+        if (panelOpen && !HOVER) togglePanel();   // on touch screens the panel would cover the graph and the edit bar
+        const store      = workflowStore();
+        const openBefore = new Set((store.openWorkflows || []).map(w => w.path));
+        await app.loadGraphData(workflow, true, true, name);
+        // A failed load leaves the previous tab active; never turn that tab into the edit session
+        const tab = store.activeWorkflow;
+        if (!tab || openBefore.has(tab.path)) {
+            toast("error", "Couldn't open the run for editing", "ComfyUI didn't open a new tab for it.");
+            return;
+        }
+        // Edits are diffed against the editor's own read-back of the run, not the queued graph:
+        // some widgets re-serialize differently on load, and that drift must not count as a change.
+        const baseline = await app.graphToPrompt();
+        editSessions.set(item[1], { promptId: item[1], item, path: tab.path, name, baseline, token: held === "frozen" ? token : null });
+        renderEditBar();
+    } finally {
+        openingEdits.delete(item[1]);
+        // A freeze whose tab never became a session (failed load, an error) must not hold the queue
+        if (held === "frozen" && editSessions.get(item[1])?.token !== token) releaseEdit(token);
     }
-    const name = editTabName(item, queuePosition(item[1]));
-    hideDetailCard();
-    if (panelOpen && !HOVER) togglePanel();   // on touch screens the panel would cover the graph and the edit bar
-    const store      = workflowStore();
-    const openBefore = new Set((store.openWorkflows || []).map(w => w.path));
-    await app.loadGraphData(workflow, true, true, name);
-    // A failed load leaves the previous tab active; never turn that tab into the edit session
-    const tab = store.activeWorkflow;
-    if (!tab || openBefore.has(tab.path)) {
-        toast("error", "Couldn't open the run for editing", "ComfyUI didn't open a new tab for it.");
-        releaseEdit(token);
-        return;
-    }
-    // Edits are diffed against the editor's own read-back of the run, not the queued graph:
-    // some widgets re-serialize differently on load, and that drift must not count as a change.
-    const baseline = await app.graphToPrompt();
-    editSessions.set(item[1], { promptId: item[1], item, path: tab.path, name, baseline, token: held === "frozen" ? token : null });
-    renderEditBar();
 }
 
 // An edit session ends: forget it and let the queue go on

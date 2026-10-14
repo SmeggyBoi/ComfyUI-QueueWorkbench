@@ -27,6 +27,7 @@ class FakeQueue:
         self.not_empty = threading.Condition(self.mutex)
         self.queue = []
         self.taken = []
+        self.flags = {}
 
     def put(self, item):
         with self.mutex:
@@ -42,6 +43,11 @@ class FakeQueue:
             item = heapq.heappop(self.queue)
             self.taken.append(item[1])
             return (item, len(self.taken))
+
+    def set_flag(self, name, data):
+        with self.mutex:
+            self.flags[name] = data
+            self.not_empty.notify()
 
     def get_current_queue_volatile(self):
         with self.mutex:
@@ -121,6 +127,19 @@ class FreezeTest(unittest.TestCase):
         worker.join(5)
         self.assertEqual(got[0][0][1], "d")
         self.assertLess(time.monotonic() - queued, 0.5)
+
+    def test_a_flag_wakes_a_waiting_worker_at_once_also_while_frozen(self):
+        # ComfyUI's /free sets a flag the worker handles when get() returns (main.py)
+        for paused, queue in ((False, fresh_queue()), (True, fresh_queue("a"))):
+            freeze.set_paused(paused)
+            worker, got = taken_after(queue, 10)
+            time.sleep(0.2)
+            flagged = time.monotonic()
+            queue.set_flag("unload_models", True)
+            worker.join(5)
+            self.assertEqual(got, [None], f"paused={paused}")
+            self.assertLess(time.monotonic() - flagged, 0.5)
+            self.assertEqual(queue.taken, [])
 
     def test_an_edit_freezes_until_it_ends(self):
         self.assertTrue(freeze.start_edit("t1", "b"))

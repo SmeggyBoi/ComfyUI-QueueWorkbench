@@ -3,8 +3,13 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 
 const src = fs.readFileSync(new URL("../web/queue_workbench.js", import.meta.url), "utf8").replace(/^import .*$/mg, "");
-globalThis.window   = { matchMedia: () => ({ matches: true }) };
-globalThis.document = { getElementById: () => null, addEventListener() {}, removeEventListener() {} };
+// Enough DOM for the edit bar: every element is a stand-in that accepts anything
+const fake = () => new Proxy(function () {}, {
+    get: (t, k) => k === Symbol.toPrimitive ? () => "" : fake(), set: () => true, apply: () => fake(),
+});
+globalThis.window   = { matchMedia: () => ({ matches: true }), innerWidth: 1000, addEventListener() {} };
+globalThis.document = { getElementById: () => null, addEventListener() {}, removeEventListener() {},
+                        createElement: () => fake(), body: { appendChild() {} }, querySelectorAll: () => [] };
 const api = { addEventListener() {} };
 const { freezeTagHtml, queueTexts, freezeNote, freezeFor } = new Function("app", "api",
     src + "\nreturn { freezeTagHtml, queueTexts, freezeNote, freezeFor };")({ registerExtension() {} }, api);
@@ -58,6 +63,56 @@ test("freezing for an edit: frozen, already started (409), or an older backend (
         assert.equal(await freezeFor("b", "t1"), expected);
     }
     assert.deepEqual(posted[0], ["/queue_workbench/freeze", { edit: "b", token: "t1", on: true }]);
+});
+
+// A panel whose ✎ opens a tab after 50 ms (or fails to); posts = the freeze requests it sent
+function editingPanel(loadGraphData) {
+    const posts = [];
+    const store = { openWorkflows: [], activeWorkflow: { path: "workflows/main.json" } };
+    store.openWorkflows.push(store.activeWorkflow);
+    let n = 0;
+    const panelApp = {
+        registerExtension() {},
+        extensionManager: { workflow: store, toast: { add() {} } },
+        loadGraphData: loadGraphData ?? (async (wf, a, b, name) => {
+            await new Promise(r => setTimeout(r, 50));
+            const tab = { path: `workflows/${name}${n++ ? ` (${n})` : ""}.json` };
+            store.openWorkflows.push(tab);
+            store.activeWorkflow = tab;
+        }),
+        graphToPrompt: async () => ({ output: {}, workflow: {} }),
+    };
+    const panelApi = { addEventListener() {}, fetchApi: async (url, opts) => {
+        if (opts) posts.push(JSON.parse(opts.body));
+        const body = url === "/queue" ? { queue_running: [], queue_pending: [] } : { paused: false, editing: ["run-b"] };
+        return { ok: true, status: 200, json: async () => body };
+    } };
+    const panel = new Function("app", "api", src + "\nreturn { editQueuedRun, editSessions, endEditSession };")(panelApp, panelApi);
+    const held = () => {
+        const off = posts.filter(p => p.on === false).map(p => p.token);
+        return posts.filter(p => p.on === true).map(p => p.token).filter(t => !off.includes(t));
+    };
+    return { ...panel, posts, held };
+}
+const edited = [2, "run-b", {}, { extra_pnginfo: { workflow: { nodes: [] } } }, []];
+
+test("a double click on ✎ freezes once, and ending the edit leaves nothing holding the queue", async () => {
+    const panel = editingPanel();
+    await Promise.all([panel.editQueuedRun(edited), new Promise(r => setTimeout(r, 20)).then(() => panel.editQueuedRun(edited))]);
+    assert.equal(panel.editSessions.size, 1);
+    assert.equal(panel.posts.filter(p => p.on === true).length, 1, "one freeze for one edit");
+    for (const s of [...panel.editSessions.values()]) panel.endEditSession(s);
+    await new Promise(r => setTimeout(r, 10));
+    assert.deepEqual(panel.held(), []);
+});
+
+test("a tab that fails to load doesn't leave the queue frozen", async () => {
+    const panel = editingPanel(async () => { throw new Error("bad graph"); });
+    await assert.rejects(panel.editQueuedRun(edited), /bad graph/);
+    await new Promise(r => setTimeout(r, 10));
+    assert.equal(panel.posts.filter(p => p.on === true).length, 1);
+    assert.deepEqual(panel.held(), []);
+    assert.equal(panel.editSessions.size, 0);
 });
 
 let failed = 0;
