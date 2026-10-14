@@ -257,6 +257,16 @@ test("carry back: a value the workflow already has is left out; a deleted node o
     assert.deepEqual(r.missing.map(c => `${c.key}|${c.index}`).sort(), ["root:20|1", "root:24|0"]);
 });
 
+test("carry back reads the workflow store's reactive state (a Proxy structuredClone can't copy)", () => {
+    const a       = run("a", { steps: 12 });
+    const after   = edited(a, w => { w.nodes[2].widgets_values[0] = 30; });
+    const changes = diffWidgets(a[3].extra_pnginfo.workflow, after[3].extra_pnginfo.workflow);
+    const state   = new Proxy(structuredClone(a[3].extra_pnginfo.workflow), {});   // like a Vue reactive object
+    const r = carryBack(state, changes);
+    assert.equal(r.workflow.nodes[2].widgets_values[0], 30);
+    assert.equal(state.nodes[2].widgets_values[0], 12);
+});
+
 test("carry back: subgraph nodes and object-style widgets_values (VHS)", () => {
     const workflow = { id: "wf", nodes: [{ id: 9, type: "sg1", widgets_values: [] }],
         definitions: { subgraphs: [{ id: "sg1", nodes: [{ id: 3, widgets_values: { frame_rate: 16, format: "video/h264-mp4" } }] }] } };

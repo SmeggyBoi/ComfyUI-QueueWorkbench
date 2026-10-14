@@ -8,7 +8,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-const BUILD = "2026-10-14b";
+const BUILD = "2026-10-14c";
 
 // Stale-JS detection (PWA caches extension JS hard): compare this bundle's BUILD
 // against the stamp the backend reads from web/queue_workbench.js ON DISK.
@@ -1247,7 +1247,7 @@ function sourceWorkflow(item, openTabs, workflowNames) {
 // value, a conflict where it has another one (applied only when overwrite holds its changeId),
 // missing where the node or widget is gone; a value it already has is left out.
 function carryBack(workflow, widgetChanges, overwrite = new Set()) {
-    const patched = structuredClone(workflow);
+    const patched = JSON.parse(JSON.stringify(workflow));   // the workflow store hands out reactive proxies
     const nodes   = workflowNodes(patched);
     const applied = [], conflicts = [], missing = [];
     for (const c of widgetChanges) {
