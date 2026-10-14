@@ -1241,6 +1241,44 @@ function editedRunPayload(item, output, workflow, changes, widgetChanges, struct
     return patched && patched.applied.length === changes.length ? patched : { prompt: output, workflow };
 }
 
+
+// Carrying an edit back into the workflow the run was queued from. The run's stamped tab name
+// and its workflow id must both match, so a Save As copy (same id) or a workflow renamed since
+// is never taken for it. Edit tabs never match: their names start with ✎.
+const changeId = c => `${c.key}|${c.index}`;
+
+// { tab } for an open tab, { path } ("workflows/…") for a saved file, null without a single match
+function sourceWorkflow(item, openTabs, workflowNames) {
+    const name = workflowName(item);
+    const id   = item[3]?.extra_pnginfo?.workflow?.id;
+    if (!name || !id) return null;
+    const tabs = openTabs.filter(t => t.filename === name && t.activeState?.id === id);
+    if (tabs.length) return tabs.length === 1 ? { tab: tabs[0] } : null;
+    const files = (workflowNames[id] || []).filter(f => f.split("/").pop().replace(/\.json$/, "") === name);
+    return files.length === 1 ? { path: `workflows/${files[0]}` } : null;
+}
+
+// A copy of workflow with the edit's widget changes: applied where it still has the run's old
+// value, a conflict where it has another one (applied only when overwrite holds its changeId),
+// missing where the node or widget is gone; a value it already has is left out.
+function carryBack(workflow, widgetChanges, overwrite = new Set()) {
+    const patched = structuredClone(workflow);
+    const nodes   = workflowNodes(patched);
+    const applied = [], conflicts = [], missing = [];
+    for (const c of widgetChanges) {
+        const values = nodes.get(c.key)?.widgets_values;
+        if (!values || typeof values !== "object" || !(c.index in values)) { missing.push(c); continue; }
+        const current = values[c.index];
+        if (same(current, c.new)) continue;
+        const conflict = !same(current, c.old);
+        if (conflict) conflicts.push({ change: c, current });
+        if (conflict && !overwrite.has(changeId(c))) continue;
+        values[c.index] = structuredClone(c.new);
+        applied.push(c);
+    }
+    return { workflow: patched, applied, conflicts, missing };
+}
+
 // "Steps", "PROMPTS", "KSampler › cfg" or a LoRA name
 function changeName(c, prompt) {
     if (c.new && typeof c.new === "object" && "lora" in c.new) return loraName(c.new.lora);

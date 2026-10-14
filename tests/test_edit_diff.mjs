@@ -5,8 +5,8 @@ import fs from "node:fs";
 const src = fs.readFileSync(new URL("../web/queue_workbench.js", import.meta.url), "utf8").replace(/^import .*$/mg, "");
 globalThis.window   = { matchMedia: () => ({ matches: true }) };
 globalThis.document = { getElementById: () => null, addEventListener() {}, removeEventListener() {} };
-const { diffPrompts, diffWidgets, patchRun, changeLabel, editedRunPayload, editTabName, siblingCandidates, validationMessage, resubmitBody, detailHtml, groupInfo, slotShifts, markDropTarget, trackDropTarget, reorderedIds, onDragStart, onDragEnd } = new Function("app", "api",
-    src + "\nreturn { diffPrompts, diffWidgets, patchRun, changeLabel, editedRunPayload, editTabName, siblingCandidates, validationMessage, resubmitBody, detailHtml, groupInfo, slotShifts, markDropTarget, trackDropTarget, reorderedIds, onDragStart, onDragEnd };")({ registerExtension() {} }, { addEventListener() {} });
+const { diffPrompts, diffWidgets, patchRun, changeLabel, editedRunPayload, editTabName, siblingCandidates, validationMessage, resubmitBody, detailHtml, groupInfo, slotShifts, markDropTarget, trackDropTarget, reorderedIds, onDragStart, onDragEnd, sourceWorkflow, carryBack } = new Function("app", "api",
+    src + "\nreturn { diffPrompts, diffWidgets, patchRun, changeLabel, editedRunPayload, editTabName, siblingCandidates, validationMessage, resubmitBody, detailHtml, groupInfo, slotShifts, markDropTarget, trackDropTarget, reorderedIds, onDragStart, onDragEnd, sourceWorkflow, carryBack };")({ registerExtension() {} }, { addEventListener() {} });
 
 const TEXT = "summary: a woman walks through a sunlit flower shop, smiling at the camera";
 function run(id, { seed = 1, text = TEXT, steps = 12, lora = true } = {}) {
@@ -190,6 +190,89 @@ test("detail card offers Move to top only for pending runs #2 and later", () => 
     assert.equal(has("Running"), false);
     assert.equal(has("Saved"), false);
     assert.equal(has("✓ Finished 14:32 · 3m 12s"), false);
+});
+
+// A run as queued from the tab "Long Videos" (the stamp the queue wrapper adds)
+const stamped = (item, name = "Long Videos") => { item[3].extra_pnginfo.workflow.extra = { qm_name: name }; return item; };
+const openTab = (path, state) => ({ path, filename: path.split("/").pop().replace(/\.json$/, ""), activeState: state });
+const edited  = (item, fn) => { const copy = structuredClone(item); fn(copy[3].extra_pnginfo.workflow); return copy; };
+
+test("source workflow: the open tab with the run's name and workflow id, not a Save As copy", () => {
+    const a      = stamped(run("a"));
+    const state  = structuredClone(a[3].extra_pnginfo.workflow);
+    const source = openTab("workflows/sub/Long Videos.json", state);
+    const copy   = openTab("workflows/Long Videos v2.json", state);       // Save As keeps the workflow id
+    const other  = openTab("workflows/Other.json", { ...state, id: "x" });
+    assert.equal(sourceWorkflow(a, [copy, other, source], {}).tab, source);
+    assert.equal(sourceWorkflow(a, [copy, other], {}), null);
+});
+
+test("source workflow: the saved file when it isn't open; nothing when ambiguous or unknown", () => {
+    const a = stamped(run("a"));
+    assert.deepEqual(sourceWorkflow(a, [], { wf: ["sub/Long Videos.json", "Long Videos v2.json"] }), { path: "workflows/sub/Long Videos.json" });
+    assert.equal(sourceWorkflow(a, [], { wf: ["a/Long Videos.json", "b/Long Videos.json"] }), null);
+    const state = structuredClone(a[3].extra_pnginfo.workflow);
+    assert.equal(sourceWorkflow(a, [openTab("workflows/a/Long Videos.json", state), openTab("workflows/b/Long Videos.json", state)], {}), null);
+    assert.equal(sourceWorkflow(run("b"), [], { wf: ["Long Videos.json"] }), null, "no stamped name, no unambiguous id match in the panel's map");
+    const noId = stamped(run("c"));
+    delete noId[3].extra_pnginfo.workflow.id;
+    assert.equal(sourceWorkflow(noId, [openTab("workflows/Long Videos.json", {})], {}), null);
+});
+
+test("carry back: values the workflow still has are applied, values changed there are conflicts, the input stays as it was", () => {
+    const a       = run("a", { steps: 12 });
+    const newText = TEXT.replace("walks", "strolls");
+    const after   = edited(a, w => { w.nodes[0].widgets_values[0] = newText; w.nodes[2].widgets_values[0] = 30; });
+    const changes = diffWidgets(a[3].extra_pnginfo.workflow, after[3].extra_pnginfo.workflow);
+    const source  = structuredClone(a[3].extra_pnginfo.workflow);
+    source.nodes[2].widgets_values[0] = 25;                                 // Steps changed in the workflow since queueing
+    const before  = structuredClone(source);
+    const r = carryBack(source, changes);
+    assert.deepEqual(r.applied.map(c => c.key), ["root:5"]);
+    assert.deepEqual(r.conflicts.map(({ change, current }) => [change.key, current]), [["root:24", 25]]);
+    assert.deepEqual(r.missing, []);
+    assert.equal(r.workflow.nodes[0].widgets_values[0], newText);
+    assert.equal(r.workflow.nodes[2].widgets_values[0], 25);
+    assert.deepEqual(source, before, "the workflow passed in is not mutated");
+    const forced = carryBack(source, changes, new Set(["root:24|0"]));
+    assert.equal(forced.workflow.nodes[2].widgets_values[0], 30);
+    assert.deepEqual(forced.applied.map(c => c.key).sort(), ["root:24", "root:5"]);
+    assert.equal(forced.conflicts.length, 1, "a ticked conflict is still reported as one");
+});
+
+test("carry back: a value the workflow already has is left out; a deleted node or widget is missing", () => {
+    const a      = run("a", { steps: 12 });
+    const after  = edited(a, w => { w.nodes[0].widgets_values[0] = "new text"; w.nodes[2].widgets_values[0] = 30; w.nodes[1].widgets_values[1] = "fixed"; });
+    const changes = diffWidgets(a[3].extra_pnginfo.workflow, after[3].extra_pnginfo.workflow);
+    const source = structuredClone(a[3].extra_pnginfo.workflow);
+    source.nodes[0].widgets_values[0] = "new text";                        // already there
+    source.nodes = source.nodes.filter(n => n.id !== 24);                  // Steps node deleted
+    source.nodes.find(n => n.id === 20).widgets_values = [1];              // seed control widget gone
+    const r = carryBack(source, changes);
+    assert.deepEqual(r.applied, []);
+    assert.deepEqual(r.conflicts, []);
+    assert.deepEqual(r.missing.map(c => `${c.key}|${c.index}`).sort(), ["root:20|1", "root:24|0"]);
+});
+
+test("carry back: subgraph nodes and object-style widgets_values (VHS)", () => {
+    const workflow = { id: "wf", nodes: [{ id: 9, type: "sg1", widgets_values: [] }],
+        definitions: { subgraphs: [{ id: "sg1", nodes: [{ id: 3, widgets_values: { frame_rate: 16, format: "video/h264-mp4" } }] }] } };
+    const r = carryBack(workflow, [{ key: "sg1:3", index: "frame_rate", old: 16, new: 24 }]);
+    assert.equal(r.applied.length, 1);
+    assert.equal(r.workflow.definitions.subgraphs[0].nodes[0].widgets_values.frame_rate, 24);
+    assert.equal(workflow.definitions.subgraphs[0].nodes[0].widgets_values.frame_rate, 16);
+});
+
+test("a seed the workflow re-rolled since queueing is a conflict", () => {
+    const a       = run("a", { seed: 111 });
+    const after   = edited(a, w => { w.nodes[1].widgets_values[0] = 222; });
+    const changes = diffWidgets(a[3].extra_pnginfo.workflow, after[3].extra_pnginfo.workflow);
+    const source  = structuredClone(a[3].extra_pnginfo.workflow);
+    source.nodes[1].widgets_values[0] = 987654;                            // "randomize" fired after queueing
+    const r = carryBack(source, changes);
+    assert.deepEqual(r.applied, []);
+    assert.deepEqual(r.conflicts.map(({ current }) => current), [987654]);
+    assert.equal(r.workflow.nodes[1].widgets_values[0], 987654);
 });
 
 let failed = 0;
