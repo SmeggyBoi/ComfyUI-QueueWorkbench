@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-queueworkbench"
-description = "A queue panel for ComfyUI: tell queued runs apart at a glance, edit queued runs in place, drag to reorder, pause, and keep the queue across restarts."
-version = "1.1.0"
+description = "A queue panel for ComfyUI: tell queued runs apart at a glance, edit queued runs in place (the queue freezes meanwhile), drag to reorder, pause, time estimates, and a history with gallery, filters and compare. Survives restarts."
+version = "1.2.0"
 license = { file = "LICENSE" }
 dependencies = []
 
@@ -12,4 +12,4 @@ Repository = "https://github.com/SmeggyBoi/ComfyUI-QueueWorkbench"
 [tool.comfy]
 PublisherId = "smeggyboi"
 DisplayName = "Queue Workbench"
-Icon = ""
+Icon = "https://raw.githubusercontent.com/SmeggyBoi/ComfyUI-QueueWorkbench/main/docs/media/icon.png"

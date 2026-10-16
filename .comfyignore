@@ -1,0 +1,4 @@
+# Kept in git, left out of the registry package (Manager installs)
+docs/
+tests/
+.github/

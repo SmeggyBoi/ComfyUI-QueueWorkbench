@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.2.0
 
 - Notifications: the *Open in browser* button is now *Save*. It downloads the finished file to the phone (its `Download` folder) instead of showing it in a browser tab, and clears the notification.
 - Editing a queued run can carry the change back into its workflow: *Also update workflow* in the Update dialog patches the workflow's open tab (marked modified) or, when it isn't open, its saved file. Values changed in the workflow since queueing are listed so you can choose which to overwrite.
