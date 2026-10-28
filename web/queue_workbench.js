@@ -8,7 +8,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-const BUILD = "2026-10-14d";
+const BUILD = "2026-10-28a";
 
 // Stale-JS detection (PWA caches extension JS hard): compare this bundle's BUILD
 // against the stamp the backend reads from web/queue_workbench.js ON DISK.
@@ -2280,9 +2280,58 @@ async function requeueRun(run) {
     await refreshQueue();
 }
 
+const POST_TIMEOUT_MS = 30000;  // one request of a ×N series; a phone that locks or drops off the network may never get its answer
+const RECHECK_DELAY_MS = 2000;  // before asking whether a lost one landed: lets a phone that just woke reconnect
+const POST_ATTEMPTS    = 3;     // sends of one variation, and tries at asking the server about it
+
+// A new prompt_id in the canonical form the server accepts. crypto.randomUUID only exists on
+// https/localhost pages; getRandomValues works on plain-http LAN addresses too.
+function newPromptId() {
+    const b = crypto.getRandomValues(new Uint8Array(16));
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    const h = [...b].map(x => x.toString(16).padStart(2, "0")).join("");
+    return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+}
+
+// Whether the server has the run with this id: queued, running or already finished. Throws when
+// it can't be reached POST_ATTEMPTS times in a row.
+async function promptLanded(promptId) {
+    for (let attempt = 1; ; attempt++) {
+        await new Promise(resolve => setTimeout(resolve, RECHECK_DELAY_MS));
+        try {
+            const signal = AbortSignal.timeout(POST_TIMEOUT_MS);
+            const queue  = await (await api.fetchApi("/queue", { signal })).json();
+            if ([...queue.queue_running, ...queue.queue_pending].some(i => i[1] === promptId)) return true;
+            return promptId in await (await api.fetchApi(`/history/${promptId}`, { signal })).json();
+        } catch (err) {
+            if (attempt >= POST_ATTEMPTS) throw err;
+        }
+    }
+}
+
+// POST one variation (it carries its own prompt_id) and return { res, data }, or null when the
+// answer got lost but the server has the run. A lost answer (timeout, dropped network) is only
+// sent again once the server says it doesn't have the run, so it is neither dropped nor queued
+// twice; throws after POST_ATTEMPTS sends, or when the server can't be asked.
+async function postVariation(body) {
+    for (let attempt = 1; ; attempt++) {
+        try {
+            const res = await api.fetchApi("/prompt", {
+                method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+                signal: AbortSignal.timeout(POST_TIMEOUT_MS),
+            });
+            return { res, data: await res.json().catch(() => ({})) };
+        } catch (err) {
+            if (await promptLanded(body.prompt_id)) return null;
+            if (attempt >= POST_ATTEMPTS) throw err;
+        }
+    }
+}
+
 // count copies of a run at the end of the queue, each with its own new seeds. A History run is
 // fetched in full first (the list carries a cut-down workflow); queued runs carry theirs. Stops
-// at the first copy the server rejects, can't reach, or only partially queues (some outputs
+// at the first copy the server rejects, can't take, or only partially queues (some outputs
 // failed validation but ComfyUI queued the rest anyway, so it still counts).
 async function queueVariations(item, run, count) {
     if (varyBusy) {
@@ -2296,18 +2345,17 @@ async function queueVariations(item, run, count) {
         const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
         const seeded = rerollSeeds(full).changed > 0;
         for (let k = 0; k < count; k++) {
-            const body = variationBody(full, api.clientId);
-            let res;
+            const body = { ...variationBody(full, api.clientId), prompt_id: newPromptId() };
+            let answer;
             try {
-                res = await api.fetchApi("/prompt", {
-                    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
-                });
+                answer = await postVariation(body);
             } catch (err) {
                 toast("error", `Couldn't queue variation ${k + 1} of ${count}`, `${err.message} — ${k} of ${count} queued`);
                 if (k > 0) await refreshQueue();
                 return;
             }
-            const data = await res.json().catch(() => ({}));
+            if (!answer) continue;
+            const { res, data } = answer;
             if (!res.ok) {
                 toast("error", `Couldn't queue variation ${k + 1} of ${count}`,
                     `${validationMessage(data, [{ prompt_id: data.prompt_id, prompt: body.prompt }])} — ${k} of ${count} queued`);

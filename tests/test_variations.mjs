@@ -2,30 +2,50 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 
-const src = fs.readFileSync(new URL("../web/queue_workbench.js", import.meta.url), "utf8").replace(/^import .*$/mg, "");
+// Lost answers time out after 30 ms here instead of 30 s
+const src = fs.readFileSync(new URL("../web/queue_workbench.js", import.meta.url), "utf8").replace(/^import .*$/mg, "")
+    .replace("const POST_TIMEOUT_MS = 30000;", "const POST_TIMEOUT_MS = 30;")
+    .replace("const RECHECK_DELAY_MS = 2000;", "const RECHECK_DELAY_MS = 1;");
 globalThis.window   = { matchMedia: () => ({ matches: true }) };
 globalThis.document = { getElementById: () => null, querySelector: () => null, querySelectorAll: () => [] };
 // A stand-in server for queueVariations: /prompt answers the k-th POST with answer(k), the
-// history route serves historyItems by prompt_id, /queue is empty (the panel's refresh)
+// history route serves historyItems by prompt_id, /queue lists `held` (empty for the panel's
+// refresh) and /history/<id> knows the runs in `done`. An answer of LOST(where) never arrives
+// (the request is only given up by its timeout); where = "queue" / "history" = the server got
+// it anyway. offline = /queue and /history can't be reached either.
 const calls  = [];   // fetched URLs, in order
 const posted = [];   // bodies POSTed to /prompt
 const toasts = [];
 const OK     = { ok: true, body: { prompt_id: "new", number: 1, node_errors: {} } };
+const LOST   = (where = null) => ({ lost: where });
+const held   = new Set();
+const done   = new Set();
 let answer       = () => OK;
 let historyItems = {};
 let gate         = null; // set to a promise to delay the next /prompt response once
+let offline      = false;
 const api = {
     clientId: "tab-1",
     addEventListener() {},
     async fetchApi(url, options = {}) {
         calls.push(url);
         if (url === "/prompt") {
-            posted.push(JSON.parse(options.body));
+            const sent = JSON.parse(options.body);
+            posted.push(sent);
             if (gate) { await gate; gate = null; }
-            const { ok, body } = answer(posted.length - 1);
-            return { ok, json: async () => body };
+            const { ok, body, lost } = answer(posted.length - 1);
+            if (lost === undefined) return { ok, json: async () => body };
+            if (lost) (lost === "queue" ? held : done).add(sent.prompt_id);
+            return new Promise((_, reject) => options.signal.addEventListener("abort", () => reject(options.signal.reason)));
         }
-        if (url === "/queue") return { ok: true, json: async () => ({ queue_running: [], queue_pending: [] }) };
+        if (offline && (url === "/queue" || url.startsWith("/history/"))) throw new Error("Failed to fetch");
+        if (url === "/queue") {
+            return { ok: true, json: async () => ({ queue_running: [], queue_pending: [...held].map((id, i) => [i, id, {}, {}, []]) }) };
+        }
+        if (url.startsWith("/history/")) {
+            const id = url.slice("/history/".length);
+            return { ok: true, json: async () => (done.has(id) ? { [id]: { outputs: {} } } : {}) };
+        }
         const prompt = historyItems[decodeURIComponent(url.replace("/queue_workbench/history/", ""))];
         return { ok: !!prompt, json: async () => ({ run: { prompt } }) };
     },
@@ -43,7 +63,12 @@ function server(reply = () => OK) {
     toasts.length = 0;
     answer = reply;
     gate = null;
+    held.clear();
+    done.clear();
+    offline = false;
 }
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 const tests = [];
 const test = (name, fn) => tests.push([name, fn]);
@@ -243,9 +268,11 @@ test("variations of a finished run: its full entry first, then N posts in a row,
     assert.equal(calls[0], "/queue_workbench/history/old-id");
     assert.equal(posted.length, 3);
     assert.equal(new Set([111, ...posted.map(b => b.prompt["3"].inputs.seed)]).size, 4, "three new seeds, none the old one");
+    assert.equal(new Set(posted.map(b => b.prompt_id)).size, 3, "a different id per variation");
     for (const body of posted) {
         assert.equal(body.client_id, "tab-1");
-        assert.ok(!("prompt_id" in body) && !("number" in body) && !("front" in body), "end of the queue, the server picks the ids");
+        assert.ok(!("number" in body) && !("front" in body), "end of the queue");
+        assert.match(body.prompt_id, UUID, "its own id, in the form the server accepts");
         assert.equal(body.extra_data.extra_pnginfo.workflow.nodes[0].widgets_values[0], body.prompt["3"].inputs.seed, "the outputs' workflow has the seed used");
         assert.ok(body.prompt["3"].inputs.seed <= 2 ** 31 - 1, "fits 32-bit-capped seed inputs");
     }
@@ -283,16 +310,57 @@ test("node_errors on a 200 answer: the series stops, that run still counts as qu
     assert.ok(refreshed(), "it was queued, so the panel refreshes");
 });
 
-test("a network failure mid-series: the toast says how many queued, no more posts follow", async () => {
+test("a network failure mid-series: the server didn't get it, so the same run is sent again and the series goes on", async () => {
     server(k => { if (k === 1) throw new Error("Failed to fetch"); return OK; });
     await queueVariations(wfRun(), null, 3);
-    assert.equal(posted.length, 2, "the attempt that failed still counts as a post");
+    assert.equal(posted.length, 4, "variation 2 sent twice");
+    assert.deepEqual(posted[2], posted[1], "the resend is the same run, same id and seed");
+    assert.equal(new Set(posted.map(b => b.prompt_id)).size, 3);
+    assert.deepEqual(toasts.map(t => [t.severity, t.summary]), [["success", "Queued 3 variations of Wf"]]);
+});
+
+test("an answer that never comes but the server got the run: not sent again, the series goes on", async () => {
+    for (const where of ["queue", "history"]) {
+        server(k => (k === 1 ? LOST(where) : OK));
+        await queueVariations(wfRun(), null, 3);
+        assert.equal(posted.length, 3, `${where}: no resend, it would queue the run twice`);
+        assert.equal(new Set(posted.map(b => b.prompt_id)).size, 3, where);
+        assert.deepEqual(toasts.map(t => [t.severity, t.summary]), [["success", "Queued 3 variations of Wf"]], where);
+        assert.ok(refreshed(), where);
+    }
+});
+
+test("an answer that never comes and the server never got it: sent again with the same id", async () => {
+    server(k => (k === 1 ? LOST() : OK));
+    await queueVariations(wfRun(), null, 3);
+    assert.equal(posted.length, 4);
+    assert.deepEqual(posted[2], posted[1]);
+    assert.deepEqual(toasts.map(t => [t.severity, t.summary]), [["success", "Queued 3 variations of Wf"]]);
+});
+
+test("every send of a variation lost: gives up after 3 sends and says how many were queued", async () => {
+    server(k => (k === 0 ? OK : LOST()));
+    await queueVariations(wfRun(), null, 4);
+    assert.equal(posted.length, 4, "1 + 3 sends of variation 2, nothing after it");
+    assert.equal(new Set(posted.slice(1).map(b => b.prompt_id)).size, 1);
+    assert.deepEqual(toasts.map(t => [t.severity, t.summary]), [["error", "Couldn't queue variation 2 of 4"]]);
+    assert.match(toasts[0].detail, / — 1 of 4 queued$/);
+    assert.ok(refreshed(), "the one that queued shows up");
+});
+
+test("a lost answer while the server can't be reached at all: stops, never sends blind", async () => {
+    server(k => {
+        if (k === 1) { offline = true; throw new Error("Failed to fetch"); }
+        return OK;
+    });
+    await queueVariations(wfRun(), null, 3);
+    assert.equal(posted.length, 2, "no resend without knowing whether the first one landed");
     assert.deepEqual(toasts.map(t => [t.severity, t.summary, t.detail]),
         [["error", "Couldn't queue variation 2 of 3", "Failed to fetch — 1 of 3 queued"]]);
-    assert.ok(refreshed(), "the one that queued shows up");
-    server(() => { throw new Error("Failed to fetch"); });
+    server(() => { offline = true; throw new Error("Failed to fetch"); });
     await queueVariations(wfRun(), null, 2);
-    assert.ok(!calls.includes("/queue"), "nothing queued yet, nothing to refresh");
+    assert.equal(posted.length, 1);
+    assert.match(toasts[0].detail, / — 0 of 2 queued$/);
 });
 
 test("a second ×N click while one is still posting doesn't start a second series", async () => {
@@ -324,8 +392,11 @@ test("a queued run without seeds is queued as identical runs, and the toast says
 });
 
 let failed = 0;
+// Node's AbortSignal.timeout timers don't keep the process alive; a lost answer would end the run early
+const keepAlive = setInterval(() => {}, 1000);
 for (const [name, fn] of tests) {
     try { await fn(); console.log(`ok   ${name}`); } catch (e) { failed++; console.log(`FAIL ${name}\n     ${e.message}`); }
 }
+clearInterval(keepAlive);
 console.log(`${tests.length - failed}/${tests.length} passed`);
 process.exit(failed ? 1 : 0);
