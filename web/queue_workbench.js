@@ -2258,7 +2258,9 @@ function renderWorkflowFilter() {
 }
 
 async function fullHistoryItem(run) {
-    const res = await api.fetchApi(`/queue_workbench/history/${encodeURIComponent(run.item[1])}`);
+    // Bounded: a request that never answers (phone dropping off the network) would otherwise keep
+    // the variation buttons busy until a reload
+    const res = await api.fetchApi(`/queue_workbench/history/${encodeURIComponent(run.item[1])}`, { signal: AbortSignal.timeout(30000) });
     if (!res.ok) throw new Error("This run is no longer in the history.");
     return (await res.json()).run.prompt;
 }
@@ -2283,7 +2285,10 @@ async function requeueRun(run) {
 // at the first copy the server rejects, can't reach, or only partially queues (some outputs
 // failed validation but ComfyUI queued the rest anyway, so it still counts).
 async function queueVariations(item, run, count) {
-    if (varyBusy) return;
+    if (varyBusy) {
+        toast("warn", "Still sending variations", "The previous batch is still being queued, try again in a moment.");
+        return;
+    }
     varyBusy = true;
     try {
         const full   = run ? await fullHistoryItem(run) : item;
